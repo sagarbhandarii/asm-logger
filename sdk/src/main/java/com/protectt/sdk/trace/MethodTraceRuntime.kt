@@ -1,0 +1,86 @@
+package com.protectt.sdk.trace
+
+import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+
+object MethodTraceRuntime {
+    @Volatile
+    var enabled: Boolean = true
+
+    @Volatile
+    var startupTracingOnly: Boolean = true
+
+    @Volatile
+    var startupWindowMs: Long = 15_000L
+
+    @Volatile
+    var logEachCall: Boolean = true
+
+    @Volatile
+    var captureThreadName: Boolean = true
+
+    private val processStartMs = SystemClock.elapsedRealtime()
+    private val totals = ConcurrentHashMap<String, AtomicLong>()
+    private val counts = ConcurrentHashMap<String, AtomicLong>()
+    private val maxNs = ConcurrentHashMap<String, AtomicLong>()
+
+    @JvmStatic
+    fun enter(methodId: String): Long {
+        if (!shouldTrace()) return 0L
+        return SystemClock.elapsedRealtimeNanos()
+    }
+
+    @JvmStatic
+    fun exit(methodId: String, startNanos: Long) {
+        if (startNanos == 0L || !shouldTrace()) return
+
+        val durationNs = SystemClock.elapsedRealtimeNanos() - startNanos
+        totals.getOrPut(methodId) { AtomicLong() }.addAndGet(durationNs)
+        counts.getOrPut(methodId) { AtomicLong() }.incrementAndGet()
+        maxNs.getOrPut(methodId) { AtomicLong() }.accumulateAndGet(durationNs) { old, new ->
+            if (new > old) new else old
+        }
+
+        if (logEachCall) {
+            val threadInfo = if (captureThreadName) {
+                val main = if (Looper.getMainLooper().thread == Thread.currentThread()) "MAIN" else "BG"
+                " [${Thread.currentThread().name}/$main]"
+            } else {
+                ""
+            }
+            Log.d(TAG, "$methodId took ${durationNs / 1_000_000.0} ms$threadInfo")
+        }
+    }
+
+    @JvmStatic
+    fun dumpTop(limit: Int = 20) {
+        val rows = totals.keys.map { method ->
+            val total = totals[method]?.get() ?: 0L
+            val count = counts[method]?.get() ?: 0L
+            val max = maxNs[method]?.get() ?: 0L
+            Triple(method, total, Pair(count, max))
+        }.sortedByDescending { it.second }
+            .take(limit)
+
+        Log.d(TAG, "========== METHOD TRACE SUMMARY ==========")
+        rows.forEachIndexed { index, row ->
+            val count = row.third.first
+            val max = row.third.second
+            val avgMs = if (count == 0L) 0.0 else (row.second.toDouble() / count) / 1_000_000.0
+            val totalMs = row.second / 1_000_000.0
+            val maxMs = max / 1_000_000.0
+            Log.d(TAG, "${index + 1}. ${row.first} count=$count totalMs=$totalMs avgMs=$avgMs maxMs=$maxMs")
+        }
+    }
+
+    private fun shouldTrace(): Boolean {
+        if (!enabled) return false
+        if (!startupTracingOnly) return true
+        return SystemClock.elapsedRealtime() - processStartMs <= startupWindowMs
+    }
+
+    private const val TAG = "MethodTrace"
+}
