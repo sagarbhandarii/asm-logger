@@ -42,7 +42,7 @@ class MethodTracePlugin : Plugin<Project> {
 
             variant.instrumentation.transformClassesWith(
                 MethodTraceVisitorFactory::class.java,
-                InstrumentationScope.PROJECT,
+                InstrumentationScope.ALL,
             ) { params ->
                 params.enabled.set(project.provider { extension.enabled })
                 params.includePackagePrefixes.set(project.provider { includePrefixes })
