@@ -10,6 +10,9 @@ abstract class MethodTraceVisitorFactory : AsmClassVisitorFactory<MethodTracePar
         if (!parameters.get().enabled.get()) return false
 
         val className = classData.className.replace('.', '/')
+        val runtimeClassName = parameters.get().runtimeClassName.get()
+        if (className == runtimeClassName) return false
+
         val included = parameters.get().includePackagePrefixes.get().any { prefix ->
             className.startsWith(prefix)
         }
@@ -28,6 +31,7 @@ abstract class MethodTraceVisitorFactory : AsmClassVisitorFactory<MethodTracePar
         return MethodTraceClassVisitor(
             api = instrumentationContext.apiVersion.get(),
             next = nextClassVisitor,
+            runtimeClassName = parameters.get().runtimeClassName.get(),
         )
     }
 }
