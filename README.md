@@ -69,10 +69,46 @@ methodTrace {
 
 2. Share these with consumers:
    - Plugin id: `com.protectt.methodtrace`
-   - Plugin version: `1.0.0`
+   - Plugin version: `2.0.0`
    - Maven coordinates for marker plugin:
-     `com.protectt.methodtrace:com.protectt.methodtrace.gradle.plugin:1.0.0`
+     `com.protectt.methodtrace:com.protectt.methodtrace.gradle.plugin:2.0.0`
    - Maven repository URL where you host artifacts (Nexus/Artifactory/GitHub Packages/local file repo copy).
+
+## Host and use from a local Maven repository
+
+1. Set plugin version in `build-logic/build.gradle.kts`:
+
+   ```kotlin
+   group = "com.protectt.trace"
+   version = "2.0.0"
+   ```
+
+2. Publish plugin + marker artifacts into this project local repo folder (`repo/`):
+
+   ```bash
+   ./gradlew :build-logic:publishAllPublicationsToLocalPluginRepoRepository
+   ```
+
+3. In the consumer project `settings.gradle.kts`, point `pluginManagement.repositories` to the local folder:
+
+   ```kotlin
+   pluginManagement {
+       repositories {
+           google()
+           mavenCentral()
+           maven(url = uri("file:///ABSOLUTE_PATH_TO/asm-logger/repo"))
+           gradlePluginPortal()
+       }
+   }
+   ```
+
+4. Apply plugin by id + version in the consumer module:
+
+   ```kotlin
+   plugins {
+       id("com.protectt.methodtrace") version "2.0.0"
+   }
+   ```
 
 ## Integrate in another Android app/library
 
@@ -94,7 +130,7 @@ methodTrace {
    plugins {
        id("com.android.library")
        id("org.jetbrains.kotlin.android")
-       id("com.protectt.methodtrace") version "1.0.0"
+       id("com.protectt.methodtrace") version "2.0.0"
    }
    ```
 
