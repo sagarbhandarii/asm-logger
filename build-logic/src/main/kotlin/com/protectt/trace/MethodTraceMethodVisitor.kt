@@ -13,6 +13,7 @@ class MethodTraceMethodVisitor(
     name: String,
     descriptor: String,
     private val methodId: String,
+    private val runtimeClassName: String,
 ) : AdviceAdapter(api, mv, access, name, descriptor) {
 
     private var startVarIndex: Int = -1
@@ -20,7 +21,7 @@ class MethodTraceMethodVisitor(
     override fun onMethodEnter() {
         visitLdcInsn(methodId)
         invokeStatic(
-            Type.getObjectType("ai/protectt/app/security/trace/MethodTraceRuntime"),
+            Type.getObjectType(runtimeClassName),
             Method("enter", "(Ljava/lang/String;)J"),
         )
         startVarIndex = newLocal(Type.LONG_TYPE)
@@ -32,7 +33,7 @@ class MethodTraceMethodVisitor(
             visitLdcInsn(methodId)
             loadLocal(startVarIndex, Type.LONG_TYPE)
             invokeStatic(
-                Type.getObjectType("ai/protectt/app/security/trace/MethodTraceRuntime"),
+                Type.getObjectType(runtimeClassName),
                 Method("exit", "(Ljava/lang/String;J)V"),
             )
         }

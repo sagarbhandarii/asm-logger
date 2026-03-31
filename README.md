@@ -10,10 +10,20 @@ This project contains:
 
 At build time, ASM injects calls to:
 
-- `com.protectt.sdk.trace.MethodTraceRuntime.enter(methodId)` at method entry
-- `com.protectt.sdk.trace.MethodTraceRuntime.exit(methodId, startNanos)` at every method exit
+- `<module-namespace>/trace/MethodTraceRuntime.enter(methodId)` at method entry
+- `<module-namespace>/trace/MethodTraceRuntime.exit(methodId, startNanos)` at every method exit
 
-Only classes whose internal JVM names start with `includePackagePrefixes` are instrumented.
+By default, it instruments classes in the current Android module namespace (no hardcoded package path).
+
+## Zero-hardcode defaults
+
+When the plugin is applied to a module, it now automatically derives:
+
+- `runtimeClassName = "<android.namespace>/trace/MethodTraceRuntime"`
+- `includePackagePrefixes = listOf("<android.namespace>")`
+- `excludeClassPrefixes = listOf(runtimeClassName, "<android.namespace>/BuildConfig", "<android.namespace>/R", "<android.namespace>/R$")`
+
+So to integrate in another app/module, you only need to add a runtime object under that module namespace.
 
 ## How to run
 
@@ -37,6 +47,8 @@ Inside `sdk/build.gradle.kts`:
 ```kotlin
 methodTrace {
     enabled = true
+    // Optional: defaults are auto-generated from android.namespace
+    runtimeClassName = "com/protectt/sdk/trace/MethodTraceRuntime"
     includePackagePrefixes = listOf("com/protectt/sdk")
     excludeClassPrefixes = listOf(
         "com/protectt/sdk/trace/MethodTraceRuntime",
@@ -46,6 +58,63 @@ methodTrace {
     )
 }
 ```
+
+## Generate a shareable plugin
+
+1. Build and publish plugin to the local Maven repo folder (`repo/` in this project):
+
+   ```bash
+   ./gradlew :build-logic:publishAllPublicationsToLocalPluginRepoRepository
+   ```
+
+2. Share these with consumers:
+   - Plugin id: `com.protectt.methodtrace`
+   - Plugin version: `1.0.0`
+   - Maven coordinates for marker plugin:
+     `com.protectt.methodtrace:com.protectt.methodtrace.gradle.plugin:1.0.0`
+   - Maven repository URL where you host artifacts (Nexus/Artifactory/GitHub Packages/local file repo copy).
+
+## Integrate in another Android app/library
+
+1. Add your plugin repository in `settings.gradle.kts`:
+
+   ```kotlin
+   pluginManagement {
+       repositories {
+           google()
+           mavenCentral()
+           maven("https://<your-plugin-repo>")
+       }
+   }
+   ```
+
+2. Apply plugin in the target module:
+
+   ```kotlin
+   plugins {
+       id("com.android.library")
+       id("org.jetbrains.kotlin.android")
+       id("com.protectt.methodtrace") version "1.0.0"
+   }
+   ```
+
+3. Create runtime class in target module namespace:
+   - If module namespace is `com.client.security`, add:
+     `src/main/java/com/client/security/trace/MethodTraceRuntime.kt`
+   - Keep `@JvmStatic fun enter(methodId: String): Long` and
+     `@JvmStatic fun exit(methodId: String, startNanos: Long)` signatures.
+
+4. (Optional) Override defaults:
+
+   ```kotlin
+   methodTrace {
+       enabled = true
+       // Only if you want non-default paths:
+       // runtimeClassName = "com/client/custom/trace/MethodTraceRuntime"
+       // includePackagePrefixes = listOf("com/client/security")
+       // excludeClassPrefixes = listOf("com/client/security/BuildConfig")
+   }
+   ```
 
 ## Notes
 

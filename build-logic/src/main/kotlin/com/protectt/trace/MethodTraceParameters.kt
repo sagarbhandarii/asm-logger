@@ -14,4 +14,7 @@ interface MethodTraceParameters : InstrumentationParameters {
 
     @get:Input
     val excludeClassPrefixes: ListProperty<String>
+
+    @get:Input
+    val runtimeClassName: Property<String>
 }

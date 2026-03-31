@@ -7,6 +7,7 @@ import org.objectweb.asm.Opcodes
 class MethodTraceClassVisitor(
     api: Int,
     next: ClassVisitor,
+    private val runtimeClassName: String,
 ) : ClassVisitor(api, next) {
 
     private var className: String = ""
@@ -43,7 +44,15 @@ class MethodTraceClassVisitor(
         if (shouldSkip) return mv
 
         val methodId = "$className#$name$descriptor"
-        return MethodTraceMethodVisitor(api, mv, access, name, descriptor, methodId)
+        return MethodTraceMethodVisitor(
+            api = api,
+            mv = mv,
+            access = access,
+            name = name,
+            descriptor = descriptor,
+            methodId = methodId,
+            runtimeClassName = runtimeClassName,
+        )
     }
 
     private fun isLikelyTrivialGetterSetter(name: String, descriptor: String): Boolean {
