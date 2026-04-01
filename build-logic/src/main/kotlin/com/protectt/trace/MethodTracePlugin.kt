@@ -26,7 +26,13 @@ class MethodTracePlugin : Plugin<Project> {
             val includePrefixes = extension.includePackagePrefixes
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }
-                .ifEmpty { listOf(namespace) }
+                .ifEmpty {
+                    if (extension.includeThirdPartySdks) {
+                        emptyList()
+                    } else {
+                        listOf(namespace)
+                    }
+                }
 
             val excludePrefixes = extension.excludeClassPrefixes
                 .map { it.trim() }
@@ -42,7 +48,7 @@ class MethodTracePlugin : Plugin<Project> {
 
             variant.instrumentation.transformClassesWith(
                 MethodTraceVisitorFactory::class.java,
-                InstrumentationScope.PROJECT,
+                if (extension.includeThirdPartySdks) InstrumentationScope.ALL else InstrumentationScope.PROJECT,
             ) { params ->
                 params.enabled.set(project.provider { extension.enabled })
                 params.includePackagePrefixes.set(project.provider { includePrefixes })

@@ -13,9 +13,8 @@ abstract class MethodTraceVisitorFactory : AsmClassVisitorFactory<MethodTracePar
         val runtimeClassName = parameters.get().runtimeClassName.get()
         if (className == runtimeClassName) return false
 
-        val included = parameters.get().includePackagePrefixes.get().any { prefix ->
-            className.startsWith(prefix)
-        }
+        val includePrefixes = parameters.get().includePackagePrefixes.get()
+        val included = includePrefixes.isEmpty() || includePrefixes.any { prefix -> className.startsWith(prefix) }
         if (!included) return false
 
         val excluded = parameters.get().excludeClassPrefixes.get().any { prefix ->

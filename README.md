@@ -13,14 +13,15 @@ At build time, ASM injects calls to:
 - `<module-namespace>/trace/MethodTraceRuntime.enter(methodId)` at method entry
 - `<module-namespace>/trace/MethodTraceRuntime.exit(methodId, startNanos)` at every method exit
 
-By default, it instruments classes in the current Android module namespace (no hardcoded package path).
+By default, it instruments classes from the current module **and third-party dependencies** so SDK calls can also be timed/logged.
 
 ## Zero-hardcode defaults
 
 When the plugin is applied to a module, it now automatically derives:
 
 - `runtimeClassName = "<android.namespace>/trace/MethodTraceRuntime"`
-- `includePackagePrefixes = listOf("<android.namespace>")`
+- `includeThirdPartySdks = true` (uses `InstrumentationScope.ALL`)
+- `includePackagePrefixes = emptyList()` (treat as include all instrumentable classes)
 - `excludeClassPrefixes = listOf(runtimeClassName, "<android.namespace>/BuildConfig", "<android.namespace>/R", "<android.namespace>/R$")`
 
 So to integrate in another app/module, you only need to add a runtime object under that module namespace.
@@ -47,9 +48,10 @@ Inside `sdk/build.gradle.kts`:
 ```kotlin
 methodTrace {
     enabled = true
+    includeThirdPartySdks = true
     // Optional: defaults are auto-generated from android.namespace
     runtimeClassName = "com/protectt/sdk/trace/MethodTraceRuntime"
-    includePackagePrefixes = listOf("com/protectt/sdk")
+    includePackagePrefixes = listOf("com/protectt/sdk", "com/vendor/sdk")
     excludeClassPrefixes = listOf(
         "com/protectt/sdk/trace/MethodTraceRuntime",
         "com/protectt/sdk/BuildConfig",
