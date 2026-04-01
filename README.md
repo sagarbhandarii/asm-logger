@@ -102,7 +102,9 @@ traceCall("AppProtecttInteractor.getTrust") {
 
 If callbacks are asynchronous, also log start/end timestamps in the callback so network/wait time is included.
 
-## Generate a shareable plugin
+## Share plugin artifacts with clients (no plugin source folder)
+
+> Important: this Gradle plugin is distributed as JAR metadata/artifacts (not as an AAR).
 
 1. Build and publish plugin to the local Maven repo folder (`repo/` in this project):
 
@@ -110,12 +112,22 @@ If callbacks are asynchronous, also log start/end timestamps in the callback so 
    ./gradlew :build-logic:publishAllPublicationsToLocalPluginRepoRepository
    ```
 
-2. Share these with consumers:
-   - Plugin id: `com.protectt.methodtrace`
-   - Plugin version: `2.0.0`
-   - Maven coordinates for marker plugin:
-     `com.protectt.methodtrace:com.protectt.methodtrace.gradle.plugin:2.0.0`
-   - Maven repository URL where you host artifacts (Nexus/Artifactory/GitHub Packages/local file repo copy).
+2. Build plugin JAR to share directly with the client:
+
+   ```bash
+   ./gradlew :build-logic:jar
+   ```
+
+   Output JAR:
+   - `build-logic/build/libs/build-logic-2.0.0.jar`
+
+3. Provide clients with:
+   - **Plugin (instrumentation):**
+     - Plugin id: `com.protectt.methodtrace`
+     - Plugin version: `2.0.0`
+     - Marker coordinates: `com.protectt.methodtrace:com.protectt.methodtrace.gradle.plugin:2.0.0`
+   - **JAR file:** `build-logic/build/libs/build-logic-2.0.0.jar`
+   - Client should add this JAR on Gradle build classpath (examples below).
 
 ## Host and use from a local Maven repository
 
@@ -155,7 +167,7 @@ If callbacks are asynchronous, also log start/end timestamps in the callback so 
 
 ## Integrate in another Android app/library
 
-1. Add your plugin repository in `settings.gradle.kts`:
+1. Add your plugin repository in `settings.gradle.kts` (for plugin resolution):
 
    ```kotlin
    pluginManagement {
@@ -176,6 +188,7 @@ If callbacks are asynchronous, also log start/end timestamps in the callback so 
        id("com.protectt.methodtrace") version "2.0.0"
    }
    ```
+
 
 3. Create runtime class in target module namespace:
    - If module namespace is `com.client.security`, add:
@@ -223,6 +236,16 @@ Runtime output JSON example is available at:
        id("com.android.library") // or com.android.application
        id("org.jetbrains.kotlin.android")
        id("com.protectt.methodtrace") version "2.0.0"
+   }
+   ```
+
+   If you received only the plugin JAR (instead of a Maven repo), add it to root `build.gradle.kts`:
+
+   ```kotlin
+   buildscript {
+       dependencies {
+           classpath(files("libs/build-logic-2.0.0.jar"))
+       }
    }
    ```
 
@@ -278,6 +301,16 @@ Runtime output JSON example is available at:
    }
    ```
 
+   If you received only the plugin JAR (instead of a Maven repo), add it to root `build.gradle`:
+
+   ```groovy
+   buildscript {
+       dependencies {
+           classpath files("libs/build-logic-2.0.0.jar")
+       }
+   }
+   ```
+
 3. Add runtime class in your module namespace:
    - Example: `src/main/java/com/client/security/trace/MethodTraceRuntime.kt`
    - Keep signatures:
@@ -304,6 +337,91 @@ Runtime output JSON example is available at:
    // or directly:
    MethodTraceRuntime.dumpTopJson(20)
    ```
+
+## Plugin JAR integration steps (separate + sorted)
+
+Use this when client receives only:
+`build-logic/build/libs/build-logic-2.0.0.jar`
+
+### Kotlin DSL only (`.kts`)
+
+#### A) Base app project (root)
+
+1. Copy plugin JAR into base app root `libs/` folder:
+   - `BASE_APP/libs/build-logic-2.0.0.jar`
+2. In base app root `build.gradle.kts`, add plugin JAR to buildscript classpath:
+
+```kotlin
+buildscript {
+    dependencies {
+        classpath(files("libs/build-logic-2.0.0.jar"))
+    }
+}
+```
+
+#### B) SDK module inside base app
+
+1. In `sdk/build.gradle.kts` (or your target library module), apply plugin:
+
+```kotlin
+plugins {
+    id("com.android.library")
+    id("org.jetbrains.kotlin.android")
+    id("com.protectt.methodtrace")
+}
+```
+
+2. Add runtime class in SDK module namespace:
+   - Example:
+     `sdk/src/main/java/com/client/security/trace/MethodTraceRuntime.kt`
+3. (Optional) Configure:
+
+```kotlin
+methodTrace {
+    enabled = true
+    includeThirdPartySdks = true
+}
+```
+
+### Groovy DSL only (`.gradle`)
+
+#### A) Base app project (root)
+
+1. Copy plugin JAR into base app root `libs/` folder:
+   - `BASE_APP/libs/build-logic-2.0.0.jar`
+2. In base app root `build.gradle`, add plugin JAR to buildscript classpath:
+
+```groovy
+buildscript {
+    dependencies {
+        classpath files("libs/build-logic-2.0.0.jar")
+    }
+}
+```
+
+#### B) SDK module inside base app
+
+1. In `sdk/build.gradle` (or your target library module), apply plugin:
+
+```groovy
+plugins {
+    id 'com.android.library'
+    id 'org.jetbrains.kotlin.android'
+    id 'com.protectt.methodtrace'
+}
+```
+
+2. Add runtime class in SDK module namespace:
+   - Example:
+     `sdk/src/main/java/com/client/security/trace/MethodTraceRuntime.kt`
+3. (Optional) Configure:
+
+```groovy
+methodTrace {
+    enabled = true
+    includeThirdPartySdks = true
+}
+```
 
 ## Notes
 
