@@ -16,10 +16,13 @@ class MethodTracePlugin : Plugin<Project> {
         val androidComponents = project.extensions.findByType(AndroidComponentsExtension::class.java)
             ?: error("com.protectt.methodtrace must be applied after an Android plugin")
 
-        val namespace = resolveAndroidNamespace(project)
-        ensureRuntimeObject(project, namespace)
+        project.afterEvaluate {
+            val namespace = resolveAndroidNamespace(project)
+            ensureRuntimeObject(project, namespace)
+        }
 
         androidComponents.onVariants { variant ->
+            val namespace = resolveAndroidNamespace(project)
             val runtimeClassName = extension.runtimeClassName
                 ?.trim()
                 ?.takeIf { it.isNotEmpty() }
