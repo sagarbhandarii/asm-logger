@@ -16,8 +16,10 @@ class MethodTracePlugin : Plugin<Project> {
         val androidComponents = project.extensions.findByType(AndroidComponentsExtension::class.java)
             ?: error("com.protectt.methodtrace must be applied after an Android plugin")
 
+        val namespace = resolveAndroidNamespace(project)
+        ensureRuntimeObject(project, namespace)
+
         androidComponents.onVariants { variant ->
-            val namespace = resolveAndroidNamespace(project)
             val runtimeClassName = extension.runtimeClassName
                 ?.trim()
                 ?.takeIf { it.isNotEmpty() }
@@ -64,6 +66,62 @@ class MethodTracePlugin : Plugin<Project> {
                 params.runtimeClassName.set(project.provider { runtimeClassName })
             }
             variant.instrumentation.setAsmFramesComputationMode(FramesComputationMode.COPY_FRAMES)
+        }
+    }
+
+
+    private fun ensureRuntimeObject(project: Project, namespacePath: String) {
+        if (runtimeSourceExists(project, namespacePath)) return
+
+        val androidExt = project.extensions.findByName("android")
+            ?: return
+
+        val namespaceDot = namespacePath.replace('/', '.')
+        val outputDirProvider = project.layout.buildDirectory.dir("generated/source/methodtrace/runtime")
+        val generateTask = project.tasks.register(
+            "generateMethodTraceRuntime",
+            GenerateMethodTraceRuntimeTask::class.java,
+        ) { task ->
+            task.namespace.set(namespaceDot)
+            task.outputDir.set(outputDirProvider)
+        }
+
+        val sourceSets = androidExt::class.java.methods
+            .firstOrNull { it.name == "getSourceSets" && it.parameterCount == 0 }
+            ?.invoke(androidExt)
+            ?: return
+
+        val iterator = (sourceSets as? Iterable<*>)?.iterator() ?: return
+        while (iterator.hasNext()) {
+            val sourceSet = iterator.next() ?: continue
+            val getName = sourceSet::class.java.methods.firstOrNull { it.name == "getName" && it.parameterCount == 0 }
+            val name = getName?.invoke(sourceSet) as? String ?: continue
+            if (name != "main") continue
+
+            val javaBlock = sourceSet::class.java.methods
+                .firstOrNull { it.name == "getJava" && it.parameterCount == 0 }
+                ?.invoke(sourceSet)
+                ?: continue
+
+            javaBlock::class.java.methods
+                .firstOrNull { it.name == "srcDir" && it.parameterCount == 1 }
+                ?.invoke(javaBlock, outputDirProvider)
+
+            project.tasks.matching { it.name == "preBuild" }.configureEach {
+                it.dependsOn(generateTask)
+            }
+            break
+        }
+    }
+
+    private fun runtimeSourceExists(project: Project, namespacePath: String): Boolean {
+        val runtimeRel = namespacePath + "/trace/MethodTraceRuntime"
+        val roots = listOf("src/main/java", "src/main/kotlin")
+        val extensions = listOf("kt", "java")
+        return roots.any { root ->
+            extensions.any { ext ->
+                project.file("$root/$runtimeRel.$ext").exists()
+            }
         }
     }
 

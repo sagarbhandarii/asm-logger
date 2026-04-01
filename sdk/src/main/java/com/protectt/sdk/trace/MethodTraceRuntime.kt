@@ -3,6 +3,7 @@ package com.protectt.sdk.trace
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -43,6 +44,8 @@ object MethodTraceRuntime {
         maxNs.getOrPut(methodId) { AtomicLong() }.accumulateAndGet(durationNs) { old, new ->
             if (new > old) new else old
         }
+
+        persistJsonReport()
 
         if (logEachCall) {
             val threadInfo = if (captureThreadName) {
@@ -119,6 +122,26 @@ object MethodTraceRuntime {
             "\"methodCount\":${rows.size}," +
             "\"methods\":[$methodsJson]" +
             "}"
+    }
+
+
+    private fun persistJsonReport() {
+        runCatching {
+            val file = resolveOutputFile()
+            file.parentFile?.mkdirs()
+            file.writeText(buildTopJson(limit = 200))
+        }.onFailure {
+            Log.w(TAG, "Failed to write JSON trace report: ${it.message}")
+        }
+    }
+
+    private fun resolveOutputFile(): File {
+        val configured = System.getProperty("method.trace.output.path")?.trim().orEmpty()
+        if (configured.isNotEmpty()) return File(configured)
+
+        val tempDir = System.getProperty("java.io.tmpdir")?.trim().orEmpty()
+        val baseDir = if (tempDir.isNotEmpty()) File(tempDir) else File("/data/local/tmp")
+        return File(baseDir, "methodtrace-report.json")
     }
 
     private fun shouldTrace(): Boolean {
