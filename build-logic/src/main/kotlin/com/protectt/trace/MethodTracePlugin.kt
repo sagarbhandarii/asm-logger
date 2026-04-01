@@ -82,9 +82,9 @@ class MethodTracePlugin : Plugin<Project> {
             "generateMethodTraceRuntime",
             GenerateMethodTraceRuntimeTask::class.java
         )
-        generateTask.configure { task ->
-            task.namespace.set(namespaceDot)
-            task.outputDir.set(outputDirProvider)
+        generateTask.configure {
+            namespace.set(namespaceDot)
+            outputDir.set(outputDirProvider)
         }
 
         val sourceSets = androidExt::class.java.methods
@@ -109,7 +109,7 @@ class MethodTracePlugin : Plugin<Project> {
                 ?.invoke(javaBlock, outputDirProvider)
 
             project.tasks.matching { it.name == "preBuild" }.configureEach {
-                it.dependsOn(generateTask)
+                dependsOn(generateTask)
             }
             break
         }
