@@ -1,0 +1,33 @@
+{
+  "traceSession": {
+    "tag": "MethodTrace",
+    "enabled": true,
+    "startupTracingOnly": true,
+    "startupWindowMs": 15000,
+    "generatedAtEpochMs": 1711958400000
+  },
+  "methods": [
+    {
+      "methodId": "com/protectt/sdk/ProtecttSdk#init(Landroid/content/Context;)V",
+      "count": 1,
+      "totalNs": 1900000000,
+      "totalMs": 1900.0,
+      "avgMs": 1900.0,
+      "maxNs": 1900000000,
+      "maxMs": 1900.0
+    },
+    {
+      "methodId": "com/protectt/sdk/internal/RootChecker#check(Landroid/content/Context;)Z",
+      "count": 1,
+      "totalNs": 800000000,
+      "totalMs": 800.0,
+      "avgMs": 800.0,
+      "maxNs": 800000000,
+      "maxMs": 800.0
+    }
+  ],
+  "summary": {
+    "methodCount": 2,
+    "note": "Use MethodTraceRuntime.buildTopJson(limit) or dumpTopJson(limit) to produce runtime JSON output."
+  }
+}

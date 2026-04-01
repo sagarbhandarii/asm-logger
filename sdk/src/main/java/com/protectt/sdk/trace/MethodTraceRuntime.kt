@@ -76,10 +76,68 @@ object MethodTraceRuntime {
         }
     }
 
+    @JvmStatic
+    fun dumpTopJson(limit: Int = 20) {
+        Log.d(TAG, buildTopJson(limit))
+    }
+
+    @JvmStatic
+    fun buildTopJson(limit: Int = 20): String {
+        val rows = totals.keys.map { method ->
+            val total = totals[method]?.get() ?: 0L
+            val count = counts[method]?.get() ?: 0L
+            val max = maxNs[method]?.get() ?: 0L
+            Triple(method, total, Pair(count, max))
+        }.sortedByDescending { it.second }
+            .take(limit)
+
+        val methodsJson = rows.joinToString(separator = ",") { row ->
+            val method = row.first
+            val totalNs = row.second
+            val count = row.third.first
+            val maxNs = row.third.second
+            val avgNs = if (count == 0L) 0.0 else totalNs.toDouble() / count
+            val totalMs = totalNs / 1_000_000.0
+            val avgMs = avgNs / 1_000_000.0
+            val maxMs = maxNs / 1_000_000.0
+            "{" +
+                "\"methodId\":\"${method.escapeJson()}\"," +
+                "\"count\":$count," +
+                "\"totalNs\":$totalNs," +
+                "\"totalMs\":$totalMs," +
+                "\"avgMs\":$avgMs," +
+                "\"maxNs\":$maxNs," +
+                "\"maxMs\":$maxMs" +
+                "}"
+        }
+
+        return "{" +
+            "\"tag\":\"$TAG\"," +
+            "\"enabled\":$enabled," +
+            "\"startupTracingOnly\":$startupTracingOnly," +
+            "\"startupWindowMs\":$startupWindowMs," +
+            "\"methodCount\":${rows.size}," +
+            "\"methods\":[$methodsJson]" +
+            "}"
+    }
+
     private fun shouldTrace(): Boolean {
         if (!enabled) return false
         if (!startupTracingOnly) return true
         return SystemClock.elapsedRealtime() - processStartMs <= startupWindowMs
+    }
+
+    private fun String.escapeJson(): String = buildString(length) {
+        this@escapeJson.forEach { char ->
+            when (char) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> append(char)
+            }
+        }
     }
 
     private const val TAG = "MethodTrace"
