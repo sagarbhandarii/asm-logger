@@ -5,6 +5,8 @@ open class MethodTraceExtension {
     /**
      * When true, instrument classes coming from external dependencies as well.
      * This is required to capture timings for third-party SDK methods.
+     * Note: AGP does not support dependency instrumentation for Android library modules,
+     * so library modules are automatically downgraded to project-only instrumentation.
      */
     var includeThirdPartySdks: Boolean = true
 

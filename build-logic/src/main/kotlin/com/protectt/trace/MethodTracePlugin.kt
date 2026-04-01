@@ -22,6 +22,14 @@ class MethodTracePlugin : Plugin<Project> {
                 ?.trim()
                 ?.takeIf { it.isNotEmpty() }
                 ?: "$namespace/trace/MethodTraceRuntime"
+            val isLibraryModule = project.plugins.hasPlugin("com.android.library")
+            val allowDependencyInstrumentation = extension.includeThirdPartySdks && !isLibraryModule
+            if (extension.includeThirdPartySdks && isLibraryModule) {
+                project.logger.warn(
+                    "methodTrace.includeThirdPartySdks=true is not supported for Android library modules. " +
+                        "Falling back to project-only instrumentation for ${project.path}:${variant.name}."
+                )
+            }
 
             val includePrefixes = extension.includePackagePrefixes
                 .map { it.trim() }
@@ -48,7 +56,7 @@ class MethodTracePlugin : Plugin<Project> {
 
             variant.instrumentation.transformClassesWith(
                 MethodTraceVisitorFactory::class.java,
-                if (extension.includeThirdPartySdks) InstrumentationScope.ALL else InstrumentationScope.PROJECT,
+                if (allowDependencyInstrumentation) InstrumentationScope.ALL else InstrumentationScope.PROJECT,
             ) { params ->
                 params.enabled.set(project.provider { extension.enabled })
                 params.includePackagePrefixes.set(project.provider { includePrefixes })

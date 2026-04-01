@@ -13,14 +13,14 @@ At build time, ASM injects calls to:
 - `<module-namespace>/trace/MethodTraceRuntime.enter(methodId)` at method entry
 - `<module-namespace>/trace/MethodTraceRuntime.exit(methodId, startNanos)` at every method exit
 
-By default, it instruments classes from the current module **and third-party dependencies** so SDK calls can also be timed/logged.
+By default, it instruments classes from the current module, and for app/test modules it can also instrument third-party dependencies.
 
 ## Zero-hardcode defaults
 
 When the plugin is applied to a module, it now automatically derives:
 
 - `runtimeClassName = "<android.namespace>/trace/MethodTraceRuntime"`
-- `includeThirdPartySdks = true` (uses `InstrumentationScope.ALL`)
+- `includeThirdPartySdks = true` (uses `InstrumentationScope.ALL` where AGP supports it; library modules fall back to project scope)
 - `includePackagePrefixes = emptyList()` (treat as include all instrumentable classes)
 - `excludeClassPrefixes = listOf(runtimeClassName, "<android.namespace>/BuildConfig", "<android.namespace>/R", "<android.namespace>/R$")`
 
