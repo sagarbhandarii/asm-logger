@@ -80,8 +80,9 @@ class MethodTracePlugin : Plugin<Project> {
         val outputDirProvider = project.layout.buildDirectory.dir("generated/source/methodtrace/runtime")
         val generateTask = project.tasks.register(
             "generateMethodTraceRuntime",
-            GenerateMethodTraceRuntimeTask::class.java,
-        ) { task ->
+            GenerateMethodTraceRuntimeTask::class.java
+        )
+        generateTask.configure { task ->
             task.namespace.set(namespaceDot)
             task.outputDir.set(outputDirProvider)
         }
