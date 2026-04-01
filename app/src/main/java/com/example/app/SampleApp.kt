@@ -10,16 +10,16 @@ class SampleApp : Application() {
     override fun onCreate() {
         super.onCreate()
 
-    /* MethodTraceRuntime.enabled = true
+        MethodTraceRuntime.enabled = true
         MethodTraceRuntime.startupTracingOnly = true
         MethodTraceRuntime.startupWindowMs = 20_000L
         MethodTraceRuntime.logEachCall = true
-        MethodTraceRuntime.captureThreadName = true*/
+        MethodTraceRuntime.captureThreadName = true
 
         ProtecttSdk.init(this)
 
-        /*Handler(Looper.getMainLooper()).postDelayed({
+        Handler(Looper.getMainLooper()).postDelayed({
             MethodTraceRuntime.dumpTop(20)
-        }, 3_000L)*/
+        }, 3_000L)
     }
 }

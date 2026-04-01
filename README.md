@@ -61,6 +61,47 @@ methodTrace {
 }
 ```
 
+
+## Measure third-party SDK time (e.g., `AppProtecttInteractor`)
+
+Yes — you can measure third-party SDK execution time in two ways:
+
+1. **Automatic (preferred):** enable method tracing with `includeThirdPartySdks = true` in the module where the SDK is used.
+2. **Manual wrapper timing:** wrap specific calls when you want exact checkpoints around SDK APIs.
+
+Example manual wrapper in your `ApplicationClass`:
+
+```kotlin
+private inline fun <T> traceCall(name: String, block: () -> T): T {
+    val start = android.os.SystemClock.elapsedRealtimeNanos()
+    return try {
+        block()
+    } finally {
+        val tookMs = (android.os.SystemClock.elapsedRealtimeNanos() - start) / 1_000_000.0
+        android.util.Log.d("SdkTimer", "$name took $tookMs ms")
+    }
+}
+
+traceCall("AppProtecttInteractor.initAppProtectt") {
+    AppProtecttInteractor(applicationContext).initAppProtectt(
+        "SplashScreen",
+        R.layout.alert_layout_logo,
+        R.mipmap.ic_launcher,
+        0,
+        BuildConfig.BUILD_TYPE,
+        2,
+        "nonprod",
+        ""
+    )
+}
+
+traceCall("AppProtecttInteractor.getTrust") {
+    AppProtecttInteractor.getTrust(applicationContext)
+}
+```
+
+If callbacks are asynchronous, also log start/end timestamps in the callback so network/wait time is included.
+
 ## Generate a shareable plugin
 
 1. Build and publish plugin to the local Maven repo folder (`repo/` in this project):
