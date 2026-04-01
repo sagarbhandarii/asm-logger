@@ -195,6 +195,116 @@ If callbacks are asynchronous, also log start/end timestamps in the callback so 
    }
    ```
 
+## Client integration quick steps (KTS + Groovy)
+
+Runtime output JSON example is available at:
+
+- `integration-steps.json` (sample method execution timing JSON)
+
+### Kotlin DSL (`.kts`)
+
+1. Add plugin repo to `settings.gradle.kts`:
+
+   ```kotlin
+   pluginManagement {
+       repositories {
+           google()
+           mavenCentral()
+           maven("https://<your-plugin-repo>")
+           gradlePluginPortal()
+       }
+   }
+   ```
+
+2. Apply plugin in module `build.gradle.kts`:
+
+   ```kotlin
+   plugins {
+       id("com.android.library") // or com.android.application
+       id("org.jetbrains.kotlin.android")
+       id("com.protectt.methodtrace") version "2.0.0"
+   }
+   ```
+
+3. Add runtime class in your module namespace:
+   - Example: `src/main/java/com/client/security/trace/MethodTraceRuntime.kt`
+   - Keep signatures:
+     - `@JvmStatic fun enter(methodId: String): Long`
+     - `@JvmStatic fun exit(methodId: String, startNanos: Long)`
+
+4. (Optional) Configure extension:
+
+   ```kotlin
+   methodTrace {
+       enabled = true
+       includeThirdPartySdks = true
+       // runtimeClassName = "com/client/security/trace/MethodTraceRuntime"
+       // includePackagePrefixes = listOf("com/client/security")
+       // excludeClassPrefixes = listOf("com/client/security/BuildConfig")
+   }
+   ```
+
+5. (Optional) Emit runtime summary as JSON:
+
+   ```kotlin
+   val json = MethodTraceRuntime.buildTopJson(limit = 20)
+   android.util.Log.d("MethodTraceJson", json)
+   // or directly:
+   MethodTraceRuntime.dumpTopJson(limit = 20)
+   ```
+
+### Groovy DSL (`.gradle`)
+
+1. Add plugin repo to `settings.gradle`:
+
+   ```groovy
+   pluginManagement {
+       repositories {
+           google()
+           mavenCentral()
+           maven { url = uri("https://<your-plugin-repo>") }
+           gradlePluginPortal()
+       }
+   }
+   ```
+
+2. Apply plugin in module `build.gradle`:
+
+   ```groovy
+   plugins {
+       id 'com.android.library' // or com.android.application
+       id 'org.jetbrains.kotlin.android'
+       id 'com.protectt.methodtrace' version '2.0.0'
+   }
+   ```
+
+3. Add runtime class in your module namespace:
+   - Example: `src/main/java/com/client/security/trace/MethodTraceRuntime.kt`
+   - Keep signatures:
+     - `@JvmStatic fun enter(methodId: String): Long`
+     - `@JvmStatic fun exit(methodId: String, startNanos: Long)`
+
+4. (Optional) Configure extension:
+
+   ```groovy
+   methodTrace {
+       enabled = true
+       includeThirdPartySdks = true
+       // runtimeClassName = "com/client/security/trace/MethodTraceRuntime"
+       // includePackagePrefixes = ["com/client/security"]
+       // excludeClassPrefixes = ["com/client/security/BuildConfig"]
+   }
+   ```
+
+5. (Optional) Emit runtime summary as JSON:
+
+   ```groovy
+   def json = MethodTraceRuntime.buildTopJson(20)
+   android.util.Log.d("MethodTraceJson", json)
+   // or directly:
+   MethodTraceRuntime.dumpTopJson(20)
+   ```
+
 ## Notes
 
 - This project is structured for AGP `8.5.2` and Kotlin `1.9.24`.
