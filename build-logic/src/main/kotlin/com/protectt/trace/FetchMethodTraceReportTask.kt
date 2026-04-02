@@ -33,6 +33,7 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
     init {
         group = "method trace"
         description = "Waits, pulls MethodTrace JSON from device, sorts methods by totalNs, and writes local report."
+        doNotTrackState("Writes reports to a user-configurable directory that may contain unreadable files.")
     }
 
     @TaskAction
