@@ -139,9 +139,26 @@ object MethodTraceRuntime {
         val configured = System.getProperty("method.trace.output.path")?.trim().orEmpty()
         if (configured.isNotEmpty()) return File(configured)
 
+        resolveAppFilesDir()?.let { filesDir ->
+            return File(filesDir, "methodtrace-report.json")
+        }
+
         val tempDir = System.getProperty("java.io.tmpdir")?.trim().orEmpty()
         val baseDir = if (tempDir.isNotEmpty()) File(tempDir) else File("/data/local/tmp")
         return File(baseDir, "methodtrace-report.json")
+    }
+
+    private fun resolveAppFilesDir(): File? {
+        return runCatching {
+            val activityThread = Class.forName("android.app.ActivityThread")
+            val currentApplication = activityThread
+                .getDeclaredMethod("currentApplication")
+                .invoke(null) ?: return@runCatching null
+            val filesDir = currentApplication::class.java
+                .getMethod("getFilesDir")
+                .invoke(currentApplication) as? File
+            filesDir
+        }.getOrNull()
     }
 
     private fun shouldTrace(): Boolean {
