@@ -66,18 +66,12 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
             )
         }
 
-        val jsonText = stdOut.toString().trim()
-        if (jsonText.isEmpty()) {
+        val rawOutput = stdOut.toString()
+        if (rawOutput.isBlank()) {
             throw GradleException("Fetched report is empty for package=$pkg path=$remote")
         }
 
-        val parsed = JsonSlurper().parseText(jsonText)
-        if (parsed !is MutableMap<*, *>) {
-            throw GradleException("Unexpected JSON shape. Expected object at root.")
-        }
-
-        @Suppress("UNCHECKED_CAST")
-        val root = parsed as MutableMap<String, Any?>
+        val root = parseReportRoot(rawOutput)
         val methods = (root["methods"] as? List<*>)
             ?.mapNotNull { it as? MutableMap<String, Any?> }
             .orEmpty()
@@ -92,5 +86,84 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
         outFile.writeText(JsonOutput.prettyPrint(JsonOutput.toJson(root)))
 
         logger.lifecycle("[methodTrace] Saved sorted report: ${outFile.absolutePath}")
+    }
+
+    private fun parseReportRoot(rawOutput: String): MutableMap<String, Any?> {
+        val trimmed = rawOutput.trim()
+        val candidates = linkedSetOf(trimmed)
+
+        val firstBrace = trimmed.indexOf('{')
+        val lastBrace = trimmed.lastIndexOf('}')
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+            candidates.add(trimmed.substring(firstBrace, lastBrace + 1))
+        }
+
+        if (trimmed.startsWith("{\\") || trimmed.startsWith("[\\")) {
+            candidates.add(unescapeLikelyJson(trimmed))
+        }
+
+        for (candidate in candidates) {
+            val parsed = runCatching { JsonSlurper().parseText(candidate) }.getOrNull() ?: continue
+            when (parsed) {
+                is MutableMap<*, *> -> {
+                    @Suppress("UNCHECKED_CAST")
+                    return parsed as MutableMap<String, Any?>
+                }
+                is String -> {
+                    val parsedInner = runCatching { JsonSlurper().parseText(parsed) }.getOrNull()
+                    if (parsedInner is MutableMap<*, *>) {
+                        @Suppress("UNCHECKED_CAST")
+                        return parsedInner as MutableMap<String, Any?>
+                    }
+                }
+            }
+        }
+
+        val preview = trimmed.take(160).replace("\n", "\\n")
+        throw GradleException(
+            "Failed to parse MethodTrace JSON from device output. " +
+                "Preview=\"$preview\""
+        )
+    }
+
+    private fun unescapeLikelyJson(input: String): String {
+        val decoded = StringBuilder(input.length)
+        var index = 0
+        while (index < input.length) {
+            val current = input[index]
+            if (current == '\\' && index + 1 < input.length) {
+                when (val next = input[index + 1]) {
+                    '\\' -> {
+                        decoded.append('\\')
+                        index += 2
+                    }
+                    '"' -> {
+                        decoded.append('"')
+                        index += 2
+                    }
+                    'n' -> {
+                        decoded.append('\n')
+                        index += 2
+                    }
+                    'r' -> {
+                        decoded.append('\r')
+                        index += 2
+                    }
+                    't' -> {
+                        decoded.append('\t')
+                        index += 2
+                    }
+                    else -> {
+                        decoded.append(current)
+                        decoded.append(next)
+                        index += 2
+                    }
+                }
+            } else {
+                decoded.append(current)
+                index++
+            }
+        }
+        return decoded.toString()
     }
 }
