@@ -447,7 +447,13 @@ methodTrace {
 ### Run task
 
 ```bash
-./gradlew :app-security:fetchMethodTraceReport
+./gradlew :<your-module-name>:fetchMethodTraceReport
+```
+
+Example in this sample project:
+
+```bash
+./gradlew :sdk:fetchMethodTraceReport
 ```
 
 Output file format in project root:
@@ -457,3 +463,4 @@ Output file format in project root:
 Notes:
 - Device must be connected and authorized via ADB.
 - App process must have already produced `methodtrace-report.json` on device.
+- If Gradle says the project path is missing, run `./gradlew projects` and use the exact module path shown there.

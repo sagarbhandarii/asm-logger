@@ -27,7 +27,9 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
     private fun runtimeSource(packageName: String): String = """
         package $packageName
 
+        import android.os.Looper
         import android.os.SystemClock
+        import android.util.Log
         import java.io.File
         import java.util.concurrent.ConcurrentHashMap
         import java.util.concurrent.atomic.AtomicLong
@@ -41,6 +43,12 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
 
             @Volatile
             var startupWindowMs: Long = 15_000L
+
+            @Volatile
+            var logEachCall: Boolean = true
+
+            @Volatile
+            var captureThreadName: Boolean = true
 
             private val processStartMs = SystemClock.elapsedRealtime()
             private val totals = ConcurrentHashMap<String, AtomicLong>()
@@ -65,6 +73,16 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
                 }
 
                 persistJsonReport()
+
+                if (logEachCall) {
+                    val threadInfo = if (captureThreadName) {
+                        val main = if (Looper.getMainLooper().thread == Thread.currentThread()) "MAIN" else "BG"
+                        " [${'$'}{Thread.currentThread().name}/${'$'}main]"
+                    } else {
+                        ""
+                    }
+                    Log.d(TAG, "${'$'}methodId took ${'$'}{durationNs / 1_000_000.0} ms${'$'}threadInfo")
+                }
             }
 
             @JvmStatic
@@ -118,9 +136,26 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
                 val configured = System.getProperty("method.trace.output.path")?.trim().orEmpty()
                 if (configured.isNotEmpty()) return File(configured)
 
+                resolveAppFilesDir()?.let { filesDir ->
+                    return File(filesDir, "methodtrace-report.json")
+                }
+
                 val tempDir = System.getProperty("java.io.tmpdir")?.trim().orEmpty()
                 val baseDir = if (tempDir.isNotEmpty()) File(tempDir) else File("/data/local/tmp")
                 return File(baseDir, "methodtrace-report.json")
+            }
+
+            private fun resolveAppFilesDir(): File? {
+                return runCatching {
+                    val activityThread = Class.forName("android.app.ActivityThread")
+                    val currentApplication = activityThread
+                        .getDeclaredMethod("currentApplication")
+                        .invoke(null) ?: return@runCatching null
+                    val filesDir = currentApplication::class.java
+                        .getMethod("getFilesDir")
+                        .invoke(currentApplication) as? File
+                    filesDir
+                }.getOrNull()
             }
 
             private fun shouldTrace(): Boolean {
@@ -141,6 +176,8 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
                     }
                 }
             }
+
+            private const val TAG = "MethodTrace"
         }
     """.trimIndent()
 }
