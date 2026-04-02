@@ -1,466 +1,63 @@
-# Android ASM Method Trace Sample
+# Protectt Method Trace Plugin
 
-This project contains:
+`com.protectt.methodtrace` is an Android Gradle plugin that instruments bytecode with ASM to measure method execution time at runtime.
 
-- `build-logic/`: a standalone Gradle plugin named `com.protectt.methodtrace`
-- `sdk/`: a sample Android library instrumented by the plugin
-- `app/`: a sample Android app that calls the SDK during startup
+This repository includes:
+
+- `build-logic/`: the Gradle plugin implementation.
+- `sdk/`: a sample Android library instrumented with the plugin.
+- `app/`: a sample Android app that calls `ProtecttSdk.init(...)` during startup.
 
 ## What the plugin does
 
-At build time, ASM injects calls to:
+For each instrumented method, the plugin injects:
 
-- `<module-namespace>/trace/MethodTraceRuntime.enter(methodId)` at method entry
-- `<module-namespace>/trace/MethodTraceRuntime.exit(methodId, startNanos)` at every method exit
+- `MethodTraceRuntime.enter(methodId)` on method entry.
+- `MethodTraceRuntime.exit(methodId, startNanos)` on method exit.
 
-By default, it instruments classes from the current module, and for app/test modules it can also instrument third-party dependencies.
+The runtime stores aggregated timing stats and writes `methodtrace-report.json`.
 
-## Zero-hardcode defaults
+## Documentation map
 
-When the plugin is applied to a module, it now automatically derives:
+Use the guide that matches your integration path:
 
-- `runtimeClassName = "<android.namespace>/trace/MethodTraceRuntime"`
-- `includeThirdPartySdks = true` (uses `InstrumentationScope.ALL` where AGP supports it; library modules fall back to project scope)
-- `includePackagePrefixes = emptyList()` (treat as include all instrumentable classes)
-- `excludeClassPrefixes = listOf(runtimeClassName, "<android.namespace>/BuildConfig", "<android.namespace>/R", "<android.namespace>/R$")`
+- **General integration and architecture:** `README.md` (this file)
+- **Kotlin DSL consumers (`build.gradle.kts`):** `README-kts.md`
+- **Groovy DSL consumers (`build.gradle`):** `README-groovy.md`
+- **Application-module integration details:** `README-app.md`
+- **Library/module integration details:** `README-module.md`
 
-So to integrate in another app/module, you only need to add a runtime object under that module namespace.
+## Quick start
 
-## How to run
+1. Add/apply plugin in your Android module.
+2. Ensure the module has `android.namespace` configured.
+3. Provide `trace/MethodTraceRuntime` under the module namespace, or let plugin generate one automatically.
+4. Build and run; inspect Logcat (`MethodTrace`) and/or JSON report.
 
-1. Open the project in Android Studio Jellyfish or later.
-2. Let Gradle sync.
-3. Run `app` on a device or emulator.
-4. Open Logcat and filter by `MethodTrace`.
+## Public extension (`methodTrace { ... }`)
 
-You should see output like:
+Available properties:
 
-```text
-com/protectt/sdk/ProtecttSdk#init(Landroid/content/Context;)V took 1900.0 ms [main/MAIN]
-com/protectt/sdk/internal/RootChecker#check(Landroid/content/Context;)Z took 800.0 ms [main/MAIN]
-com/protectt/sdk/internal/FridaDetector#scanPorts()Z took 350.0 ms [main/MAIN]
-```
+- `enabled: Boolean` (default `true`)
+- `includeThirdPartySdks: Boolean` (default `true`)
+- `runtimeClassName: String?` (default `<namespace>/trace/MethodTraceRuntime`)
+- `includePackagePrefixes: List<String>` (default empty; see module docs)
+- `excludeClassPrefixes: List<String>`
+- `reportApplicationId: String` (used by `fetchMethodTraceReport` task)
+- `reportDevicePath: String` (default `files/methodtrace-report.json`)
+- `reportFetchWaitSeconds: Int` (default `60`)
 
-## Customization
+Also exposed (runtime tuning values):
 
-Inside `sdk/build.gradle.kts`:
+- `startupWindowMs: Long`
+- `logEachCall: Boolean`
+- `captureThreadName: Boolean`
 
-```kotlin
-methodTrace {
-    enabled = true
-    includeThirdPartySdks = true
-    // Optional: defaults are auto-generated from android.namespace
-    runtimeClassName = "com/protectt/sdk/trace/MethodTraceRuntime"
-    includePackagePrefixes = listOf("com/protectt/sdk", "com/vendor/sdk")
-    excludeClassPrefixes = listOf(
-        "com/protectt/sdk/trace/MethodTraceRuntime",
-        "com/protectt/sdk/BuildConfig",
-        "com/protectt/sdk/R",
-        "com/protectt/sdk/R$"
-    )
-}
-```
-
-
-## Measure third-party SDK time (e.g., `AppProtecttInteractor`)
-
-Yes — you can measure third-party SDK execution time in two ways:
-
-1. **Automatic (preferred):** enable method tracing with `includeThirdPartySdks = true` in the module where the SDK is used.
-2. **Manual wrapper timing:** wrap specific calls when you want exact checkpoints around SDK APIs.
-
-Example manual wrapper in your `ApplicationClass`:
-
-```kotlin
-private inline fun <T> traceCall(name: String, block: () -> T): T {
-    val start = android.os.SystemClock.elapsedRealtimeNanos()
-    return try {
-        block()
-    } finally {
-        val tookMs = (android.os.SystemClock.elapsedRealtimeNanos() - start) / 1_000_000.0
-        android.util.Log.d("SdkTimer", "$name took $tookMs ms")
-    }
-}
-
-traceCall("AppProtecttInteractor.initAppProtectt") {
-    AppProtecttInteractor(applicationContext).initAppProtectt(
-        "SplashScreen",
-        R.layout.alert_layout_logo,
-        R.mipmap.ic_launcher,
-        0,
-        BuildConfig.BUILD_TYPE,
-        2,
-        "nonprod",
-        ""
-    )
-}
-
-traceCall("AppProtecttInteractor.getTrust") {
-    AppProtecttInteractor.getTrust(applicationContext)
-}
-```
-
-If callbacks are asynchronous, also log start/end timestamps in the callback so network/wait time is included.
-
-## Share plugin artifacts with clients (no plugin source folder)
-
-> Important: this Gradle plugin is distributed as JAR metadata/artifacts (not as an AAR).
-
-1. Build and publish plugin to the local Maven repo folder (`repo/` in this project):
-
-   ```bash
-   ./gradlew :build-logic:publishAllPublicationsToLocalPluginRepoRepository
-   ```
-
-2. Build plugin JAR to share directly with the client:
-
-   ```bash
-   ./gradlew :build-logic:jar
-   ```
-
-   Output JAR:
-   - `build-logic/build/libs/build-logic-2.0.0.jar`
-
-3. Provide clients with:
-   - **Plugin (instrumentation):**
-     - Plugin id: `com.protectt.methodtrace`
-     - Plugin version: `2.0.0`
-     - Marker coordinates: `com.protectt.methodtrace:com.protectt.methodtrace.gradle.plugin:2.0.0`
-   - **JAR file:** `build-logic/build/libs/build-logic-2.0.0.jar`
-   - Client should add this JAR on Gradle build classpath (examples below).
-
-## Host and use from a local Maven repository
-
-1. Set plugin version in `build-logic/build.gradle.kts`:
-
-   ```kotlin
-   group = "com.protectt.trace"
-   version = "2.0.0"
-   ```
-
-2. Publish plugin + marker artifacts into this project local repo folder (`repo/`):
-
-   ```bash
-   ./gradlew :build-logic:publishAllPublicationsToLocalPluginRepoRepository
-   ```
-
-3. In the consumer project `settings.gradle.kts`, point `pluginManagement.repositories` to the local folder:
-
-   ```kotlin
-   pluginManagement {
-       repositories {
-           google()
-           mavenCentral()
-           maven(url = uri("file:///ABSOLUTE_PATH_TO/asm-logger/repo"))
-           gradlePluginPortal()
-       }
-   }
-   ```
-
-4. Apply plugin by id + version in the consumer module:
-
-   ```kotlin
-   plugins {
-       id("com.protectt.methodtrace") version "2.0.0"
-   }
-   ```
-
-## Integrate in another Android app/library
-
-1. Add your plugin repository in `settings.gradle.kts` (for plugin resolution):
-
-   ```kotlin
-   pluginManagement {
-       repositories {
-           google()
-           mavenCentral()
-           maven("https://<your-plugin-repo>")
-       }
-   }
-   ```
-
-2. Apply plugin in the target module:
-
-   ```kotlin
-   plugins {
-       id("com.android.library")
-       id("org.jetbrains.kotlin.android")
-       id("com.protectt.methodtrace") version "2.0.0"
-   }
-   ```
-
-
-3. Create runtime class in target module namespace:
-   - If module namespace is `com.client.security`, add:
-     `src/main/java/com/client/security/trace/MethodTraceRuntime.kt`
-   - Keep `@JvmStatic fun enter(methodId: String): Long` and
-     `@JvmStatic fun exit(methodId: String, startNanos: Long)` signatures.
-
-4. (Optional) Override defaults:
-
-   ```kotlin
-   methodTrace {
-       enabled = true
-       // Only if you want non-default paths:
-       // runtimeClassName = "com/client/custom/trace/MethodTraceRuntime"
-       // includePackagePrefixes = listOf("com/client/security")
-       // excludeClassPrefixes = listOf("com/client/security/BuildConfig")
-   }
-   ```
-
-## Client integration quick steps (KTS + Groovy)
-
-Runtime output JSON example is available at:
-
-- `integration-steps.json` (sample method execution timing JSON)
-
-### Kotlin DSL (`.kts`)
-
-1. Add plugin repo to `settings.gradle.kts`:
-
-   ```kotlin
-   pluginManagement {
-       repositories {
-           google()
-           mavenCentral()
-           maven("https://<your-plugin-repo>")
-           gradlePluginPortal()
-       }
-   }
-   ```
-
-2. Apply plugin in module `build.gradle.kts`:
-
-   ```kotlin
-   plugins {
-       id("com.android.library") // or com.android.application
-       id("org.jetbrains.kotlin.android")
-       id("com.protectt.methodtrace") version "2.0.0"
-   }
-   ```
-
-   If you received only the plugin JAR (instead of a Maven repo), add it to root `build.gradle.kts`:
-
-   ```kotlin
-   buildscript {
-       dependencies {
-           classpath(files("libs/build-logic-2.0.0.jar"))
-       }
-   }
-   ```
-
-3. Add runtime class in your module namespace:
-   - Example: `src/main/java/com/client/security/trace/MethodTraceRuntime.kt`
-   - Keep signatures:
-     - `@JvmStatic fun enter(methodId: String): Long`
-     - `@JvmStatic fun exit(methodId: String, startNanos: Long)`
-
-4. (Optional) Configure extension:
-
-   ```kotlin
-   methodTrace {
-       enabled = true
-       includeThirdPartySdks = true
-       // runtimeClassName = "com/client/security/trace/MethodTraceRuntime"
-       // includePackagePrefixes = listOf("com/client/security")
-       // excludeClassPrefixes = listOf("com/client/security/BuildConfig")
-   }
-   ```
-
-5. (Optional) Emit runtime summary as JSON:
-
-   ```kotlin
-   val json = MethodTraceRuntime.buildTopJson(limit = 20)
-   android.util.Log.d("MethodTraceJson", json)
-   // or directly:
-   MethodTraceRuntime.dumpTopJson(limit = 20)
-   ```
-
-### Groovy DSL (`.gradle`)
-
-1. Add plugin repo to `settings.gradle`:
-
-   ```groovy
-   pluginManagement {
-       repositories {
-           google()
-           mavenCentral()
-           maven { url = uri("https://<your-plugin-repo>") }
-           gradlePluginPortal()
-       }
-   }
-   ```
-
-2. Apply plugin in module `build.gradle`:
-
-   ```groovy
-   plugins {
-       id 'com.android.library' // or com.android.application
-       id 'org.jetbrains.kotlin.android'
-       id 'com.protectt.methodtrace' version '2.0.0'
-   }
-   ```
-
-   If you received only the plugin JAR (instead of a Maven repo), add it to root `build.gradle`:
-
-   ```groovy
-   buildscript {
-       dependencies {
-           classpath files("libs/build-logic-2.0.0.jar")
-       }
-   }
-   ```
-
-3. Add runtime class in your module namespace:
-   - Example: `src/main/java/com/client/security/trace/MethodTraceRuntime.kt`
-   - Keep signatures:
-     - `@JvmStatic fun enter(methodId: String): Long`
-     - `@JvmStatic fun exit(methodId: String, startNanos: Long)`
-
-4. (Optional) Configure extension:
-
-   ```groovy
-   methodTrace {
-       enabled = true
-       includeThirdPartySdks = true
-       // runtimeClassName = "com/client/security/trace/MethodTraceRuntime"
-       // includePackagePrefixes = ["com/client/security"]
-       // excludeClassPrefixes = ["com/client/security/BuildConfig"]
-   }
-   ```
-
-5. (Optional) Emit runtime summary as JSON:
-
-   ```groovy
-   def json = MethodTraceRuntime.buildTopJson(20)
-   android.util.Log.d("MethodTraceJson", json)
-   // or directly:
-   MethodTraceRuntime.dumpTopJson(20)
-   ```
-
-## Plugin JAR integration steps (separate + sorted)
-
-Use this when client receives only:
-`build-logic/build/libs/build-logic-2.0.0.jar`
-
-### Kotlin DSL only (`.kts`)
-
-#### A) Base app project (root)
-
-1. Copy plugin JAR into base app root `libs/` folder:
-   - `BASE_APP/libs/build-logic-2.0.0.jar`
-2. In base app root `build.gradle.kts`, add plugin JAR to buildscript classpath:
-
-```kotlin
-buildscript {
-    dependencies {
-        classpath(files("libs/build-logic-2.0.0.jar"))
-    }
-}
-```
-
-#### B) SDK module inside base app
-
-1. In `sdk/build.gradle.kts` (or your target library module), apply plugin:
-
-```kotlin
-plugins {
-    id("com.android.library")
-    id("org.jetbrains.kotlin.android")
-    id("com.protectt.methodtrace")
-}
-```
-
-2. Add runtime class in SDK module namespace:
-   - Example:
-     `sdk/src/main/java/com/client/security/trace/MethodTraceRuntime.kt`
-3. (Optional) Configure:
-
-```kotlin
-methodTrace {
-    enabled = true
-    includeThirdPartySdks = true
-}
-```
-
-### Groovy DSL only (`.gradle`)
-
-#### A) Base app project (root)
-
-1. Copy plugin JAR into base app root `libs/` folder:
-   - `BASE_APP/libs/build-logic-2.0.0.jar`
-2. In base app root `build.gradle`, add plugin JAR to buildscript classpath:
-
-```groovy
-buildscript {
-    dependencies {
-        classpath files("libs/build-logic-2.0.0.jar")
-    }
-}
-```
-
-#### B) SDK module inside base app
-
-1. In `sdk/build.gradle` (or your target library module), apply plugin:
-
-```groovy
-plugins {
-    id 'com.android.library'
-    id 'org.jetbrains.kotlin.android'
-    id 'com.protectt.methodtrace'
-}
-```
-
-2. Add runtime class in SDK module namespace:
-   - Example:
-     `sdk/src/main/java/com/client/security/trace/MethodTraceRuntime.kt`
-3. (Optional) Configure:
-
-```groovy
-methodTrace {
-    enabled = true
-    includeThirdPartySdks = true
-}
-```
-
-## Notes
-
-- This project is structured for AGP `8.5.2` and Kotlin `1.9.24`.
-- The plugin instruments the `sdk` module because that module applies `com.protectt.methodtrace`.
-- Native methods are intentionally skipped because they do not have Java bytecode bodies. If you need JNI timing, add `ATrace_beginSection/ATrace_endSection` in C/C++.
-
-## Auto-fetch device JSON after delay (new)
-
-The plugin now exposes a helper Gradle task to wait and pull `MethodTraceRuntime` JSON from a connected device, sort by highest `totalNs`, and save a timestamped JSON in the project root.
-
-### Configure in module (`build.gradle.kts` or `.gradle` equivalent)
-
-```kotlin
-methodTrace {
-    // Existing options...
-    reportApplicationId = "a.abc.bcd"
-    reportDevicePath = "files/methodtrace-report.json"
-    reportFetchWaitSeconds = 60
-}
-```
-
-### Run task
+## Build and validate locally
 
 ```bash
-./gradlew :<your-module-name>:fetchMethodTraceReport
+./gradlew :sdk:assembleDebug
+./gradlew :app:assembleDebug
 ```
 
-Example in this sample project:
-
-```bash
-./gradlew :sdk:fetchMethodTraceReport
-```
-
-Output file format in project root:
-
-- `methodtrace-YYYYMMDD-HHMMSS.json`
-
-Notes:
-- Device must be connected and authorized via ADB.
-- App process must have already produced `methodtrace-report.json` on device.
-- If Gradle says the project path is missing, run `./gradlew projects` and use the exact module path shown there.
+Plugin publication examples are covered in the DSL-specific guides.

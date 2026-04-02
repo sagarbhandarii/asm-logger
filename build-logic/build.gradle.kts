@@ -15,8 +15,6 @@ repositories {
 
 dependencies {
     compileOnly("com.android.tools.build:gradle:8.5.2")
-
-    // change this from compileOnly to implementation for easier client distribution
     implementation("org.ow2.asm:asm-commons:9.6")
 }
 
