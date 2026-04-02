@@ -8,25 +8,11 @@ import org.gradle.api.Project
 
 class MethodTracePlugin : Plugin<Project> {
     override fun apply(project: Project) {
-        val extension = project.extensions.create(
-            "methodTrace",
-            MethodTraceExtension::class.java
-        )
-
+        val extension = project.extensions.create("methodTrace", MethodTraceExtension::class.java)
         val androidComponents = project.extensions.findByType(AndroidComponentsExtension::class.java)
             ?: error("com.protectt.methodtrace must be applied after an Android plugin")
 
-
-        val fetchReportTask = project.tasks.register(
-            "fetchMethodTraceReport",
-            FetchMethodTraceReportTask::class.java
-        )
-        fetchReportTask.configure {
-            applicationId.set(project.provider { extension.reportApplicationId })
-            deviceReportPath.set(project.provider { extension.reportDevicePath })
-            waitSeconds.set(project.provider { extension.reportFetchWaitSeconds })
-            outputDir.set(project.rootProject.layout.projectDirectory.dir("."))
-        }
+        registerFetchReportTask(project, extension)
 
         project.afterEvaluate {
             val namespace = resolveAndroidNamespace(project)
@@ -35,12 +21,10 @@ class MethodTracePlugin : Plugin<Project> {
 
         androidComponents.onVariants { variant ->
             val namespace = resolveAndroidNamespace(project)
-            val runtimeClassName = extension.runtimeClassName
-                ?.trim()
-                ?.takeIf { it.isNotEmpty() }
-                ?: "$namespace/trace/MethodTraceRuntime"
+            val runtimeClassName = resolveRuntimeClassName(namespace, extension)
             val isLibraryModule = project.plugins.hasPlugin("com.android.library")
             val allowDependencyInstrumentation = extension.includeThirdPartySdks && !isLibraryModule
+
             if (extension.includeThirdPartySdks && isLibraryModule) {
                 project.logger.warn(
                     "methodTrace.includeThirdPartySdks=true is not supported for Android library modules. " +
@@ -48,28 +32,8 @@ class MethodTracePlugin : Plugin<Project> {
                 )
             }
 
-            val includePrefixes = extension.includePackagePrefixes
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-                .ifEmpty {
-                    if (extension.includeThirdPartySdks) {
-                        emptyList()
-                    } else {
-                        listOf(namespace)
-                    }
-                }
-
-            val excludePrefixes = extension.excludeClassPrefixes
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-                .ifEmpty {
-                    listOf(
-                        runtimeClassName,
-                        "$namespace/BuildConfig",
-                        "$namespace/R",
-                        "$namespace/R$",
-                    )
-                }
+            val includePrefixes = resolveIncludePrefixes(namespace, extension)
+            val excludePrefixes = resolveExcludePrefixes(namespace, runtimeClassName, extension)
 
             variant.instrumentation.transformClassesWith(
                 MethodTraceVisitorFactory::class.java,
@@ -84,19 +48,62 @@ class MethodTracePlugin : Plugin<Project> {
         }
     }
 
+    private fun registerFetchReportTask(project: Project, extension: MethodTraceExtension) {
+        val fetchReportTask = project.tasks.register("fetchMethodTraceReport", FetchMethodTraceReportTask::class.java)
+        fetchReportTask.configure {
+            applicationId.set(project.provider { extension.reportApplicationId })
+            deviceReportPath.set(project.provider { extension.reportDevicePath })
+            waitSeconds.set(project.provider { extension.reportFetchWaitSeconds })
+            outputDir.set(project.rootProject.layout.projectDirectory.dir("."))
+        }
+    }
+
+    private fun resolveRuntimeClassName(namespace: String, extension: MethodTraceExtension): String {
+        return extension.runtimeClassName
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: "$namespace/trace/MethodTraceRuntime"
+    }
+
+    private fun resolveIncludePrefixes(namespace: String, extension: MethodTraceExtension): List<String> {
+        return extension.includePackagePrefixes
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .ifEmpty {
+                if (extension.includeThirdPartySdks) {
+                    emptyList()
+                } else {
+                    listOf(namespace)
+                }
+            }
+    }
+
+    private fun resolveExcludePrefixes(
+        namespace: String,
+        runtimeClassName: String,
+        extension: MethodTraceExtension,
+    ): List<String> {
+        return extension.excludeClassPrefixes
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .ifEmpty {
+                listOf(
+                    runtimeClassName,
+                    "$namespace/BuildConfig",
+                    "$namespace/R",
+                    "$namespace/R$",
+                )
+            }
+    }
 
     private fun ensureRuntimeObject(project: Project, namespacePath: String) {
         if (runtimeSourceExists(project, namespacePath)) return
 
-        val androidExt = project.extensions.findByName("android")
-            ?: return
+        val androidExt = project.extensions.findByName("android") ?: return
 
         val namespaceDot = namespacePath.replace('/', '.')
         val outputDirProvider = project.layout.buildDirectory.dir("generated/source/methodtrace/runtime")
-        val generateTask = project.tasks.register(
-            "generateMethodTraceRuntime",
-            GenerateMethodTraceRuntimeTask::class.java
-        )
+        val generateTask = project.tasks.register("generateMethodTraceRuntime", GenerateMethodTraceRuntimeTask::class.java)
         generateTask.configure {
             namespace.set(namespaceDot)
             outputDir.set(outputDirProvider)
@@ -131,7 +138,7 @@ class MethodTracePlugin : Plugin<Project> {
     }
 
     private fun runtimeSourceExists(project: Project, namespacePath: String): Boolean {
-        val runtimeRel = namespacePath + "/trace/MethodTraceRuntime"
+        val runtimeRel = "$namespacePath/trace/MethodTraceRuntime"
         val roots = listOf("src/main/java", "src/main/kotlin")
         val extensions = listOf("kt", "java")
         return roots.any { root ->

@@ -33,13 +33,6 @@ android {
 
 methodTrace {
     enabled = true
- /*   includePackagePrefixes = listOf("com/protectt/sdk")
-    excludeClassPrefixes = listOf(
-        "com/protectt/sdk/trace/MethodTraceRuntime",
-        "com/protectt/sdk/BuildConfig",
-        "com/protectt/sdk/R",
-        "com/protectt/sdk/R$"
-    )*/
 }
 
 dependencies {
