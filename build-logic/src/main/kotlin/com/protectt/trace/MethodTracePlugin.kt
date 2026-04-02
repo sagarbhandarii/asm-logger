@@ -16,6 +16,18 @@ class MethodTracePlugin : Plugin<Project> {
         val androidComponents = project.extensions.findByType(AndroidComponentsExtension::class.java)
             ?: error("com.protectt.methodtrace must be applied after an Android plugin")
 
+
+        val fetchReportTask = project.tasks.register(
+            "fetchMethodTraceReport",
+            FetchMethodTraceReportTask::class.java
+        )
+        fetchReportTask.configure {
+            applicationId.set(project.provider { extension.reportApplicationId })
+            deviceReportPath.set(project.provider { extension.reportDevicePath })
+            waitSeconds.set(project.provider { extension.reportFetchWaitSeconds })
+            outputDir.set(project.rootProject.layout.projectDirectory.dir("."))
+        }
+
         project.afterEvaluate {
             val namespace = resolveAndroidNamespace(project)
             ensureRuntimeObject(project, namespace)

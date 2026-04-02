@@ -428,3 +428,32 @@ methodTrace {
 - This project is structured for AGP `8.5.2` and Kotlin `1.9.24`.
 - The plugin instruments the `sdk` module because that module applies `com.protectt.methodtrace`.
 - Native methods are intentionally skipped because they do not have Java bytecode bodies. If you need JNI timing, add `ATrace_beginSection/ATrace_endSection` in C/C++.
+
+## Auto-fetch device JSON after delay (new)
+
+The plugin now exposes a helper Gradle task to wait and pull `MethodTraceRuntime` JSON from a connected device, sort by highest `totalNs`, and save a timestamped JSON in the project root.
+
+### Configure in module (`build.gradle.kts` or `.gradle` equivalent)
+
+```kotlin
+methodTrace {
+    // Existing options...
+    reportApplicationId = "a.abc.bcd"
+    reportDevicePath = "files/methodtrace-report.json"
+    reportFetchWaitSeconds = 60
+}
+```
+
+### Run task
+
+```bash
+./gradlew :app-security:fetchMethodTraceReport
+```
+
+Output file format in project root:
+
+- `methodtrace-YYYYMMDD-HHMMSS.json`
+
+Notes:
+- Device must be connected and authorized via ADB.
+- App process must have already produced `methodtrace-report.json` on device.

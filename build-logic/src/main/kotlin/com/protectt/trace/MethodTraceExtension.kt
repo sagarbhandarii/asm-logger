@@ -31,4 +31,21 @@ open class MethodTraceExtension {
     var startupWindowMs: Long = 15_000L
     var logEachCall: Boolean = true
     var captureThreadName: Boolean = true
+
+    /**
+     * Package id used by `adb shell run-as <package>` for pulling runtime JSON.
+     */
+    var reportApplicationId: String = ""
+
+    /**
+     * Relative or absolute report file path inside app sandbox.
+     * Typical value: /data/user/0/<package>/files/methodtrace-report.json
+     */
+    var reportDevicePath: String = "files/methodtrace-report.json"
+
+    /**
+     * Delay before pulling report from connected device.
+     */
+    var reportFetchWaitSeconds: Int = 60
 }
+
