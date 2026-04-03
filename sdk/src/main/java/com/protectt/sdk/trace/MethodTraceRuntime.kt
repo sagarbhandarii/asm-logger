@@ -2,6 +2,7 @@ package com.protectt.sdk.trace
 
 import android.app.Activity
 import android.app.Application
+import android.os.Looper
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
@@ -65,6 +66,7 @@ object MethodTraceRuntime {
         val state = threadState.get() ?: return
         val node = state.stack.pollLast() ?: return
         node.durationNs = (SystemClock.elapsedRealtimeNanos() - node.startNs).coerceAtLeast(0L)
+        maybeLogMainThreadSlowCall(methodId, node.durationNs)
 
         if (state.stack.isNotEmpty()) {
             return
@@ -229,25 +231,25 @@ object MethodTraceRuntime {
         val configured = System.getProperty("method.trace.output.path")?.trim().orEmpty()
         if (configured.isNotEmpty()) return File(configured)
 
-        resolveAppFilesDir()?.let { filesDir ->
-            return File(filesDir, "methodtrace-report.txt")
-        }
-
         val tempDir = System.getProperty("java.io.tmpdir")?.trim().orEmpty()
         val baseDir = if (tempDir.isNotEmpty()) File(tempDir) else File("/data/local/tmp")
         return File(baseDir, "methodtrace-report.txt")
     }
 
-    private fun resolveAppFilesDir(): File? {
-        return runCatching {
-            val activityThread = Class.forName("android.app.ActivityThread")
-            val currentApplication = activityThread
-                .getDeclaredMethod("currentApplication")
-                .invoke(null) ?: return@runCatching null
-            currentApplication::class.java
-                .getMethod("getFilesDir")
-                .invoke(currentApplication) as? File
-        }.getOrNull()
+    private fun maybeLogMainThreadSlowCall(methodId: String, durationNs: Long) {
+        if (durationNs <= MAIN_WARN_THRESHOLD_NS) return
+        if (!isMainThread()) return
+
+        val durationMs = TimeUnit.NANOSECONDS.toMillis(durationNs)
+        if (durationMs > MAIN_CRITICAL_THRESHOLD_MS) {
+            Log.e(TAG, "[MAIN][CRITICAL] Method ${formatMethodId(methodId)} took ${durationMs}ms")
+            return
+        }
+        Log.w(TAG, "[MAIN][WARN] Method ${formatMethodId(methodId)} took ${durationMs}ms")
+    }
+
+    private fun isMainThread(): Boolean {
+        return Looper.getMainLooper().thread === Thread.currentThread()
     }
 
     private fun getOrCreateThreadState(): ThreadTraceState {
@@ -262,6 +264,9 @@ object MethodTraceRuntime {
     }
 
     private const val TAG = "MethodTrace"
+    private const val MAIN_WARN_THRESHOLD_MS = 100L
+    private const val MAIN_CRITICAL_THRESHOLD_MS = 300L
+    private const val MAIN_WARN_THRESHOLD_NS = MAIN_WARN_THRESHOLD_MS * 1_000_000L
 }
 
 object SamplingConfig {
