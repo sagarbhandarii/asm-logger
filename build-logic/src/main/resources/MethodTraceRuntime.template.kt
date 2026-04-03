@@ -1,4 +1,4 @@
-package com.protectt.sdk.trace
+package __PACKAGE__
 
 import android.app.Activity
 import android.app.Application
