@@ -33,11 +33,10 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
         import android.os.SystemClock
         import android.util.Log
         import java.io.File
-        import java.util.concurrent.ConcurrentHashMap
+        import java.util.ArrayDeque
         import java.util.concurrent.Executors
         import java.util.concurrent.ScheduledExecutorService
         import java.util.concurrent.TimeUnit
-        import java.util.concurrent.atomic.AtomicBoolean
 
         object MethodTraceRuntime {
             @Volatile
@@ -54,45 +53,54 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
 
             private val processStartMs = SystemClock.elapsedRealtime()
 
-            private data class MethodStats(
-                var totalNs: Long = 0L,
-                var calls: Long = 0L,
-                var maxNs: Long = 0L,
+            private data class TraceNode(
+                var methodId: String,
+                var startNs: Long = 0L,
+                var durationNs: Long = 0L,
+                val children: MutableList<TraceNode> = ArrayList(4),
             )
 
-            private data class ThreadBucket(
-                val lock: Any = Any(),
-                val byMethod: MutableMap<String, MethodStats> = HashMap(),
+            private data class ThreadTraceState(
+                val stack: ArrayDeque<TraceNode> = ArrayDeque(64),
+                val nodePool: ArrayDeque<TraceNode> = ArrayDeque(128),
+                val renderBuilder: StringBuilder = StringBuilder(2048),
+                val releaseStack: ArrayDeque<TraceNode> = ArrayDeque(128),
             )
 
-            private val threadBuckets = ConcurrentHashMap<Long, ThreadBucket>()
-            private val localBucket = ThreadLocal<ThreadBucket>()
+            private val threadState = ThreadLocal<ThreadTraceState>()
 
-            private val flushInProgress = AtomicBoolean(false)
             @Volatile
             private var scheduler: ScheduledExecutorService? = null
 
             @JvmStatic
             fun enter(methodId: String): Long {
                 if (!shouldTrace()) return 0L
-                return SystemClock.elapsedRealtimeNanos()
+
+                val state = getOrCreateThreadState()
+                val startNs = SystemClock.elapsedRealtimeNanos()
+                val node = acquireNode(state, methodId, startNs)
+
+                state.stack.peekLast()?.children?.add(node)
+                state.stack.addLast(node)
+                return startNs
             }
 
             @JvmStatic
             fun exit(methodId: String, startNanos: Long) {
-                if (startNanos == 0L || !shouldTrace()) return
+                if (startNanos == 0L) return
 
-                val durationNs = SystemClock.elapsedRealtimeNanos() - startNanos
-                val bucket = getOrCreateThreadBucket()
+                val state = threadState.get() ?: return
+                val node = state.stack.removeLastOrNull() ?: return
+                node.durationNs = (SystemClock.elapsedRealtimeNanos() - node.startNs).coerceAtLeast(0L)
 
-                synchronized(bucket.lock) {
-                    val stats = bucket.byMethod.getOrPut(methodId) { MethodStats() }
-                    stats.calls += 1L
-                    stats.totalNs += durationNs
-                    if (durationNs > stats.maxNs) {
-                        stats.maxNs = durationNs
-                    }
+                if (state.stack.isNotEmpty()) {
+                    return
                 }
+
+                val treeOutput = renderTree(state, node)
+                Log.d(TAG, treeOutput)
+                persistTextReport(treeOutput)
+                recycleTree(state, node)
             }
 
             @JvmStatic
@@ -148,77 +156,97 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
 
             @JvmStatic
             fun flushNow(reason: String = "manual", limit: Int = 200) {
-                if (!flushInProgress.compareAndSet(false, true)) return
-
-                try {
-                    val merged = collectAndClearBuckets()
-                    if (merged.isEmpty()) return
-
-                    val lines = merged.entries
-                        .sortedByDescending { it.value.calls }
-                        .take(limit)
-                        .map { (methodId, stats) ->
-                            val avgMs = if (stats.calls == 0L) 0.0 else (stats.totalNs.toDouble() / stats.calls) / 1_000_000.0
-                            val maxMs = stats.maxNs / 1_000_000.0
-                            "Method: ${'$'}methodId, Calls: ${'$'}{stats.calls}, Avg: ${'$'}{"%.2f".format(avgMs)}ms, Max: ${'$'}{"%.2f".format(maxMs)}ms"
-                        }
-
-                    lines.forEach { Log.d(TAG, "[${'$'}reason] ${'$'}it") }
-                    persistTextReport(lines, reason)
-                } finally {
-                    flushInProgress.set(false)
-                }
+                Log.d(TAG, "flushNow(${'$'}reason) is a no-op in call-tree mode; trees are emitted at root exit")
             }
 
-            private fun collectAndClearBuckets(): Map<String, MethodStats> {
-                val aggregated = HashMap<String, MethodStats>()
+            private fun acquireNode(state: ThreadTraceState, methodId: String, startNs: Long): TraceNode {
+                val node = state.nodePool.removeLastOrNull() ?: TraceNode(methodId)
+                node.methodId = methodId
+                node.startNs = startNs
+                node.durationNs = 0L
+                node.children.clear()
+                return node
+            }
 
-                threadBuckets.values.forEach { bucket ->
-                    val snapshot = synchronized(bucket.lock) {
-                        if (bucket.byMethod.isEmpty()) return@forEach null
-                        val copy = HashMap(bucket.byMethod)
-                        bucket.byMethod.clear()
-                        copy
-                    } ?: return@forEach
+            private data class RenderFrame(
+                val node: TraceNode,
+                val depth: Int,
+                var nextChildIndex: Int = 0,
+                var entered: Boolean = false,
+            )
 
-                    snapshot.forEach { (methodId, stats) ->
-                        val merged = aggregated.getOrPut(methodId) { MethodStats() }
-                        merged.calls += stats.calls
-                        merged.totalNs += stats.totalNs
-                        if (stats.maxNs > merged.maxNs) {
-                            merged.maxNs = stats.maxNs
-                        }
+            private fun renderTree(state: ThreadTraceState, root: TraceNode): String {
+                val sb = state.renderBuilder
+                sb.setLength(0)
+                sb.append("Thread ")
+                    .append(Thread.currentThread().name)
+                    .append(" (id=")
+                    .append(Thread.currentThread().id)
+                    .append(')')
+                    .append('\n')
+
+                val dfsStack = ArrayDeque<RenderFrame>()
+                dfsStack.addLast(RenderFrame(root, 0))
+
+                while (dfsStack.isNotEmpty()) {
+                    val frame = dfsStack.peekLast()
+                    if (!frame.entered) {
+                        appendNodeLine(sb, frame.node, frame.depth)
+                        frame.entered = true
+                    }
+
+                    if (frame.nextChildIndex < frame.node.children.size) {
+                        val child = frame.node.children[frame.nextChildIndex++]
+                        dfsStack.addLast(RenderFrame(child, frame.depth + 1))
+                    } else {
+                        dfsStack.removeLast()
                     }
                 }
 
-                return aggregated
+                return sb.toString()
             }
 
-            private fun getOrCreateThreadBucket(): ThreadBucket {
-                localBucket.get()?.let { return it }
-
-                val created = ThreadBucket()
-                val threadId = Thread.currentThread().id
-                val existing = threadBuckets.putIfAbsent(threadId, created)
-                val bucket = existing ?: created
-                localBucket.set(bucket)
-                return bucket
+            private fun appendNodeLine(sb: StringBuilder, node: TraceNode, depth: Int) {
+                repeat(depth) { sb.append("  ") }
+                sb.append("- ")
+                    .append(formatMethodId(node.methodId))
+                    .append(" (")
+                    .append(String.format("%.2f", node.durationNs / 1_000_000.0))
+                    .append("ms)")
+                    .append('\n')
             }
 
-            private fun persistTextReport(lines: List<String>, reason: String) {
+            private fun formatMethodId(methodId: String): String {
+                val hashIndex = methodId.indexOf('#')
+                if (hashIndex <= 0) return methodId
+
+                val owner = methodId.substring(0, hashIndex).replace('/', '.')
+                val methodAndDesc = methodId.substring(hashIndex + 1)
+                val parenIndex = methodAndDesc.indexOf('(')
+                val methodName = if (parenIndex >= 0) methodAndDesc.substring(0, parenIndex) else methodAndDesc
+                return "${'$'}owner.${'$'}methodName"
+            }
+
+            private fun recycleTree(state: ThreadTraceState, root: TraceNode) {
+                val release = state.releaseStack
+                release.clear()
+                release.addLast(root)
+
+                while (release.isNotEmpty()) {
+                    val current = release.removeLast()
+                    current.children.forEach { child ->
+                        release.addLast(child)
+                    }
+                    current.children.clear()
+                    state.nodePool.addLast(current)
+                }
+            }
+
+            private fun persistTextReport(tree: String) {
                 runCatching {
                     val file = resolveOutputFile()
                     file.parentFile?.mkdirs()
-                    val payload = buildString {
-                        append("reason=")
-                        append(reason)
-                        append('\n')
-                        lines.forEach {
-                            append(it)
-                            append('\n')
-                        }
-                    }
-                    file.appendText(payload)
+                    file.appendText(tree)
                 }.onFailure {
                     Log.w(TAG, "Failed to write trace report: ${'$'}{it.message}")
                 }
@@ -247,6 +275,11 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
                         .getMethod("getFilesDir")
                         .invoke(currentApplication) as? File
                 }.getOrNull()
+            }
+
+            private fun getOrCreateThreadState(): ThreadTraceState {
+                threadState.get()?.let { return it }
+                return ThreadTraceState().also { threadState.set(it) }
             }
 
             private fun shouldTrace(): Boolean {
