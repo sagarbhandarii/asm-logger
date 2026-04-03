@@ -30,6 +30,25 @@ object MethodTraceRuntime {
     private val processStartMs = SystemClock.elapsedRealtime()
     private val traceStartNs = SystemClock.elapsedRealtimeNanos()
 
+    private const val TAG = "MethodTrace"
+    private const val MAIN_WARN_THRESHOLD_MS = 100L
+    private const val MAIN_CRITICAL_THRESHOLD_MS = 300L
+    private const val MAIN_WARN_THRESHOLD_NS = MAIN_WARN_THRESHOLD_MS * 1_000_000L
+
+    private const val INITIAL_BUFFER_CAPACITY = 2_048
+    private const val MAX_BUFFERED_EVENTS = 4_096
+    private const val DEFAULT_FLUSH_BATCH_SIZE = 1_024
+
+    private const val DEFAULT_OUTPUT_PATH = "/sdcard/method_trace.json"
+
+    private const val TRACE_HEADER = "{\"traceEvents\":[\n"
+    private const val TRACE_FOOTER = "\n]}"
+    private const val COMMA_NEWLINE = ",\n"
+
+    private val TRACE_HEADER_BYTES = TRACE_HEADER.toByteArray(Charsets.UTF_8)
+    private val TRACE_FOOTER_BYTES = TRACE_FOOTER.toByteArray(Charsets.UTF_8)
+    private val COMMA_NEWLINE_BYTES = COMMA_NEWLINE.toByteArray(Charsets.UTF_8)
+
     private data class ThreadTraceState(
         val jsonBuilder: StringBuilder = StringBuilder(256),
     )
@@ -167,7 +186,7 @@ object MethodTraceRuntime {
             val count = minOf(limit, pendingEvents.size)
             buildList(count) {
                 repeat(count) {
-                    val event = pendingEvents.removeFirstOrNull() ?: return@repeat
+                    val event = pendingEvents.pollFirst() ?: return@repeat
                     add(event)
                 }
             }
@@ -281,24 +300,6 @@ object MethodTraceRuntime {
         return SystemClock.elapsedRealtime() - processStartMs <= startupWindowMs
     }
 
-    private const val TAG = "MethodTrace"
-    private const val MAIN_WARN_THRESHOLD_MS = 100L
-    private const val MAIN_CRITICAL_THRESHOLD_MS = 300L
-    private const val MAIN_WARN_THRESHOLD_NS = MAIN_WARN_THRESHOLD_MS * 1_000_000L
-
-    private const val INITIAL_BUFFER_CAPACITY = 2_048
-    private const val MAX_BUFFERED_EVENTS = 4_096
-    private const val DEFAULT_FLUSH_BATCH_SIZE = 1_024
-
-    private const val DEFAULT_OUTPUT_PATH = "/sdcard/method_trace.json"
-
-    private const val TRACE_HEADER = "{\"traceEvents\":[\n"
-    private const val TRACE_FOOTER = "\n]}"
-    private const val COMMA_NEWLINE = ",\n"
-
-    private val TRACE_HEADER_BYTES = TRACE_HEADER.toByteArray(Charsets.UTF_8)
-    private val TRACE_FOOTER_BYTES = TRACE_FOOTER.toByteArray(Charsets.UTF_8)
-    private val COMMA_NEWLINE_BYTES = COMMA_NEWLINE.toByteArray(Charsets.UTF_8)
 }
 
 object SamplingConfig {
