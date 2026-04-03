@@ -199,7 +199,7 @@ object MethodTraceRuntime {
             val count = minOf(limit, pendingEvents.size)
             buildList(count) {
                 repeat(count) {
-                    val event = pendingEvents.removeFirstOrNull() ?: return@repeat
+                    val event = pendingEvents.pollFirst() ?: return@repeat
                     add(event)
                 }
             }
