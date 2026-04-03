@@ -22,6 +22,7 @@ The runtime stores aggregated timing stats and writes `methodtrace-report.json`.
 Use the guide that matches your integration path:
 
 - **General integration and architecture:** `README.md` (this file)
+- **Plugin generation/publishing workflow:** `README-plugin-generation.md`
 - **Kotlin DSL consumers (`build.gradle.kts`):** `README-kts.md`
 - **Groovy DSL consumers (`build.gradle`):** `README-groovy.md`
 - **Application-module integration details:** `README-app.md`
