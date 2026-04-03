@@ -182,3 +182,13 @@ object MethodTraceRuntime {
 
     private const val TAG = "MethodTrace"
 }
+
+object SamplingConfig {
+    @JvmField
+    @Volatile
+    var sampleRatePercent: Int = 10
+
+    @JvmField
+    @Volatile
+    var slowCallThresholdMs: Long = 50L
+}
