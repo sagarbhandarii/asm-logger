@@ -46,6 +46,6 @@ open class MethodTraceExtension {
     /**
      * Delay before pulling report from connected device.
      */
-    var reportFetchWaitSeconds: Int = 60
+    var reportFetchWaitSeconds: Int = 1
 }
 

@@ -33,6 +33,7 @@ android {
 
 methodTrace {
     enabled = true
+    reportApplicationId ="com.example.app"
 }
 
 dependencies {
