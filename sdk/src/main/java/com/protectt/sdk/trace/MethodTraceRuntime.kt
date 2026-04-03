@@ -71,6 +71,19 @@ object MethodTraceRuntime {
     @Volatile
     private var writtenEventCount: Long = 0L
 
+    @Volatile
+    private var outputFilePathOverride: String? = null
+
+    @JvmStatic
+    fun setOutputFilePath(path: String?) {
+        outputFilePathOverride = path?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    @JvmStatic
+    fun useAppInternalFiles(application: Application, fileName: String = "methodtrace-report.json") {
+        outputFilePathOverride = File(application.filesDir, fileName).absolutePath
+    }
+
     @JvmStatic
     fun enter(methodId: String): Long {
         if (!shouldTrace()) return 0L
@@ -244,7 +257,7 @@ object MethodTraceRuntime {
     }
 
     private fun resolveOutputFile(): File {
-        return File(DEFAULT_OUTPUT_PATH)
+        return File(outputFilePathOverride ?: DEFAULT_OUTPUT_PATH)
     }
 
     private fun escapeJson(value: String): String {
