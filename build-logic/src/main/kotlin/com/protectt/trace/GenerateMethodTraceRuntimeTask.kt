@@ -27,12 +27,17 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
     private fun runtimeSource(packageName: String): String = """
         package $packageName
 
-        import android.os.Looper
+        import android.app.Activity
+        import android.app.Application
+        import android.os.Bundle
         import android.os.SystemClock
         import android.util.Log
         import java.io.File
         import java.util.concurrent.ConcurrentHashMap
-        import java.util.concurrent.atomic.AtomicLong
+        import java.util.concurrent.Executors
+        import java.util.concurrent.ScheduledExecutorService
+        import java.util.concurrent.TimeUnit
+        import java.util.concurrent.atomic.AtomicBoolean
 
         object MethodTraceRuntime {
             @Volatile
@@ -45,15 +50,27 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
             var startupWindowMs: Long = 15_000L
 
             @Volatile
-            var logEachCall: Boolean = true
-
-            @Volatile
-            var captureThreadName: Boolean = true
+            var flushIntervalSeconds: Long = 5L
 
             private val processStartMs = SystemClock.elapsedRealtime()
-            private val totals = ConcurrentHashMap<String, AtomicLong>()
-            private val counts = ConcurrentHashMap<String, AtomicLong>()
-            private val maxNs = ConcurrentHashMap<String, AtomicLong>()
+
+            private data class MethodStats(
+                var totalNs: Long = 0L,
+                var calls: Long = 0L,
+                var maxNs: Long = 0L,
+            )
+
+            private data class ThreadBucket(
+                val lock: Any = Any(),
+                val byMethod: MutableMap<String, MethodStats> = HashMap(),
+            )
+
+            private val threadBuckets = ConcurrentHashMap<Long, ThreadBucket>()
+            private val localBucket = ThreadLocal<ThreadBucket>()
+
+            private val flushInProgress = AtomicBoolean(false)
+            @Volatile
+            private var scheduler: ScheduledExecutorService? = null
 
             @JvmStatic
             fun enter(methodId: String): Long {
@@ -66,69 +83,144 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
                 if (startNanos == 0L || !shouldTrace()) return
 
                 val durationNs = SystemClock.elapsedRealtimeNanos() - startNanos
-                totals.getOrPut(methodId) { AtomicLong() }.addAndGet(durationNs)
-                counts.getOrPut(methodId) { AtomicLong() }.incrementAndGet()
-                maxNs.getOrPut(methodId) { AtomicLong() }.accumulateAndGet(durationNs) { old, new ->
-                    if (new > old) new else old
-                }
+                val bucket = getOrCreateThreadBucket()
 
-                persistJsonReport()
-
-                if (logEachCall) {
-                    val threadInfo = if (captureThreadName) {
-                        val main = if (Looper.getMainLooper().thread == Thread.currentThread()) "MAIN" else "BG"
-                        " [${'$'}{Thread.currentThread().name}/${'$'}main]"
-                    } else {
-                        ""
+                synchronized(bucket.lock) {
+                    val stats = bucket.byMethod.getOrPut(methodId) { MethodStats() }
+                    stats.calls += 1L
+                    stats.totalNs += durationNs
+                    if (durationNs > stats.maxNs) {
+                        stats.maxNs = durationNs
                     }
-                    Log.d(TAG, "${'$'}methodId took ${'$'}{durationNs / 1_000_000.0} ms${'$'}threadInfo")
                 }
             }
 
             @JvmStatic
-            fun buildTopJson(limit: Int = 200): String {
-                val rows = totals.keys.map { method ->
-                    val total = totals[method]?.get() ?: 0L
-                    val count = counts[method]?.get() ?: 0L
-                    val max = maxNs[method]?.get() ?: 0L
-                    Triple(method, total, Pair(count, max))
-                }.sortedByDescending { it.second }
-                    .take(limit)
+            fun installLifecycleFlush(application: Application, intervalSeconds: Long = flushIntervalSeconds) {
+                flushIntervalSeconds = intervalSeconds.coerceAtLeast(1L)
+                startPeriodicFlush()
 
-                val methodsJson = rows.joinToString(separator = ",") { row ->
-                    val method = row.first
-                    val totalNs = row.second
-                    val count = row.third.first
-                    val maxNsValue = row.third.second
-                    val avgNs = if (count == 0L) 0.0 else totalNs.toDouble() / count
-                    val totalMs = totalNs / 1_000_000.0
-                    val avgMs = avgNs / 1_000_000.0
-                    val maxMs = maxNsValue / 1_000_000.0
-                    "{" +
-                        "\\\"methodId\\\":\\\"${'$'}{method.escapeJson()}\\\"," +
-                        "\\\"count\\\":${'$'}count," +
-                        "\\\"totalNs\\\":${'$'}totalNs," +
-                        "\\\"totalMs\\\":${'$'}totalMs," +
-                        "\\\"avgMs\\\":${'$'}avgMs," +
-                        "\\\"maxNs\\\":${'$'}maxNsValue," +
-                        "\\\"maxMs\\\":${'$'}maxMs" +
-                        "}"
-                }
+                application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+                    private var startedCount = 0
 
-                return "{" +
-                    "\\\"generatedAtEpochMs\\\":${'$'}{System.currentTimeMillis()}," +
-                    "\\\"startupTracingOnly\\\":${'$'}startupTracingOnly," +
-                    "\\\"startupWindowMs\\\":${'$'}startupWindowMs," +
-                    "\\\"methodCount\\\":${'$'}{rows.size}," +
-                    "\\\"methods\\\":[${'$'}methodsJson]" +
-                    "}"
+                    override fun onActivityStarted(activity: Activity) {
+                        startedCount += 1
+                    }
+
+                    override fun onActivityStopped(activity: Activity) {
+                        startedCount -= 1
+                        if (startedCount <= 0) {
+                            startedCount = 0
+                            flushNow("app_background")
+                        }
+                    }
+
+                    override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+                    override fun onActivityResumed(activity: Activity) = Unit
+                    override fun onActivityPaused(activity: Activity) = Unit
+                    override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+                    override fun onActivityDestroyed(activity: Activity) = Unit
+                })
             }
 
-            private fun persistJsonReport() {
+            @JvmStatic
+            fun startPeriodicFlush() {
+                val existing = scheduler
+                if (existing != null && !existing.isShutdown) return
+
+                scheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
+                    Thread(runnable, "method-trace-flush").apply { isDaemon = true }
+                }.also {
+                    it.scheduleAtFixedRate(
+                        { flushNow("periodic") },
+                        flushIntervalSeconds,
+                        flushIntervalSeconds,
+                        TimeUnit.SECONDS,
+                    )
+                }
+            }
+
+            @JvmStatic
+            fun stopPeriodicFlush() {
+                scheduler?.shutdownNow()
+                scheduler = null
+            }
+
+            @JvmStatic
+            fun flushNow(reason: String = "manual", limit: Int = 200) {
+                if (!flushInProgress.compareAndSet(false, true)) return
+
+                try {
+                    val merged = collectAndClearBuckets()
+                    if (merged.isEmpty()) return
+
+                    val lines = merged.entries
+                        .sortedByDescending { it.value.calls }
+                        .take(limit)
+                        .map { (methodId, stats) ->
+                            val avgMs = if (stats.calls == 0L) 0.0 else (stats.totalNs.toDouble() / stats.calls) / 1_000_000.0
+                            val maxMs = stats.maxNs / 1_000_000.0
+                            "Method: ${'$'}methodId, Calls: ${'$'}{stats.calls}, Avg: ${'$'}{"%.2f".format(avgMs)}ms, Max: ${'$'}{"%.2f".format(maxMs)}ms"
+                        }
+
+                    lines.forEach { Log.d(TAG, "[${'$'}reason] ${'$'}it") }
+                    persistTextReport(lines, reason)
+                } finally {
+                    flushInProgress.set(false)
+                }
+            }
+
+            private fun collectAndClearBuckets(): Map<String, MethodStats> {
+                val aggregated = HashMap<String, MethodStats>()
+
+                threadBuckets.values.forEach { bucket ->
+                    val snapshot = synchronized(bucket.lock) {
+                        if (bucket.byMethod.isEmpty()) return@forEach null
+                        val copy = HashMap(bucket.byMethod)
+                        bucket.byMethod.clear()
+                        copy
+                    } ?: return@forEach
+
+                    snapshot.forEach { (methodId, stats) ->
+                        val merged = aggregated.getOrPut(methodId) { MethodStats() }
+                        merged.calls += stats.calls
+                        merged.totalNs += stats.totalNs
+                        if (stats.maxNs > merged.maxNs) {
+                            merged.maxNs = stats.maxNs
+                        }
+                    }
+                }
+
+                return aggregated
+            }
+
+            private fun getOrCreateThreadBucket(): ThreadBucket {
+                localBucket.get()?.let { return it }
+
+                val created = ThreadBucket()
+                val threadId = Thread.currentThread().id
+                val existing = threadBuckets.putIfAbsent(threadId, created)
+                val bucket = existing ?: created
+                localBucket.set(bucket)
+                return bucket
+            }
+
+            private fun persistTextReport(lines: List<String>, reason: String) {
                 runCatching {
-                    val reportFile = resolveOutputFile()
-                    reportFile.parentFile?.mkdirs()
-                    reportFile.writeText(buildTopJson())
+                    val file = resolveOutputFile()
+                    file.parentFile?.mkdirs()
+                    val payload = buildString {
+                        append("reason=")
+                        append(reason)
+                        append('\n')
+                        lines.forEach {
+                            append(it)
+                            append('\n')
+                        }
+                    }
+                    file.appendText(payload)
+                }.onFailure {
+                    Log.w(TAG, "Failed to write trace report: ${'$'}{it.message}")
                 }
             }
 
@@ -137,12 +229,12 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
                 if (configured.isNotEmpty()) return File(configured)
 
                 resolveAppFilesDir()?.let { filesDir ->
-                    return File(filesDir, "methodtrace-report.json")
+                    return File(filesDir, "methodtrace-report.txt")
                 }
 
                 val tempDir = System.getProperty("java.io.tmpdir")?.trim().orEmpty()
                 val baseDir = if (tempDir.isNotEmpty()) File(tempDir) else File("/data/local/tmp")
-                return File(baseDir, "methodtrace-report.json")
+                return File(baseDir, "methodtrace-report.txt")
             }
 
             private fun resolveAppFilesDir(): File? {
@@ -151,10 +243,9 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
                     val currentApplication = activityThread
                         .getDeclaredMethod("currentApplication")
                         .invoke(null) ?: return@runCatching null
-                    val filesDir = currentApplication::class.java
+                    currentApplication::class.java
                         .getMethod("getFilesDir")
                         .invoke(currentApplication) as? File
-                    filesDir
                 }.getOrNull()
             }
 
@@ -164,30 +255,17 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
                 return SystemClock.elapsedRealtime() - processStartMs <= startupWindowMs
             }
 
-            private fun String.escapeJson(): String = buildString(length) {
-                this@escapeJson.forEach { char ->
-                    when (char) {
-                        '\\' -> append("\\\\")
-                        '\"' -> append("\\\"")
-                        '\n' -> append("\\n")
-                        '\r' -> append("\\r")
-                        '\t' -> append("\\t")
-                        else -> append(char)
-                    }
-                }
-            }
-
             private const val TAG = "MethodTrace"
         }
 
         object SamplingConfig {
             @JvmField
             @Volatile
-            var sampleRatePercent: Int = 10
+            var sampleRatePercent: Int = 100
 
             @JvmField
             @Volatile
-            var slowCallThresholdMs: Long = 50L
+            var slowCallThresholdMs: Long = 0L
         }
     """.trimIndent()
 }

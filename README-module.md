@@ -36,6 +36,12 @@ Place `MethodTraceRuntime` in:
 
 `src/main/java/<namespace-path>/trace/MethodTraceRuntime.kt`
 
+For aggregated tracing, initialize lifecycle flushing from your `Application`:
+
+```kotlin
+MethodTraceRuntime.installLifecycleFlush(this, intervalSeconds = 5L)
+```
+
 Required API:
 
 ```kotlin

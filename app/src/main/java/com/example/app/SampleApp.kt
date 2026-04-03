@@ -1,8 +1,6 @@
 package com.example.app
 
 import android.app.Application
-import android.os.Handler
-import android.os.Looper
 import com.protectt.sdk.ProtecttSdk
 import com.protectt.sdk.trace.MethodTraceRuntime
 
@@ -13,13 +11,8 @@ class SampleApp : Application() {
         MethodTraceRuntime.enabled = true
         MethodTraceRuntime.startupTracingOnly = true
         MethodTraceRuntime.startupWindowMs = 20_000L
-        MethodTraceRuntime.logEachCall = true
-        MethodTraceRuntime.captureThreadName = true
+        MethodTraceRuntime.installLifecycleFlush(this, intervalSeconds = 5L)
 
         ProtecttSdk.init(this)
-
-        Handler(Looper.getMainLooper()).postDelayed({
-            MethodTraceRuntime.dumpTop(20)
-        }, 3_000L)
     }
 }

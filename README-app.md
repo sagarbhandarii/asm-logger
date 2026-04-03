@@ -15,7 +15,7 @@ Use this guide when applying `com.protectt.methodtrace` in an Android **applicat
 3. Configure `methodTrace` extension.
 4. Ensure runtime object exists under `<namespace>/trace/MethodTraceRuntime`.
 5. Run app to execute startup/use-case path.
-6. Inspect Logcat or pull JSON report.
+6. Inspect Logcat or pull periodic/background flush report.
 
 ## Kotlin DSL app example
 
@@ -34,7 +34,7 @@ methodTrace {
     enabled = true
     includeThirdPartySdks = true
     reportApplicationId = "com.example.app"
-    reportDevicePath = "files/methodtrace-report.json"
+    reportDevicePath = "files/methodtrace-report.txt"
     reportFetchWaitSeconds = 20
 }
 ```
@@ -45,8 +45,7 @@ methodTrace {
 MethodTraceRuntime.enabled = true
 MethodTraceRuntime.startupTracingOnly = true
 MethodTraceRuntime.startupWindowMs = 20_000L
-MethodTraceRuntime.logEachCall = true
-MethodTraceRuntime.captureThreadName = true
+MethodTraceRuntime.installLifecycleFlush(this, intervalSeconds = 5L)
 ```
 
 ## Inputs and outputs
@@ -56,8 +55,8 @@ MethodTraceRuntime.captureThreadName = true
 - Runtime flags (`enabled`, startup settings).
 
 **Outputs**
-- Per-call timings in Logcat.
-- Aggregated JSON report containing method ID, count, totalNs, avgMs, maxMs.
+- Aggregated flush lines in Logcat (`Method: X, Calls: N, Avg: Yms, Max: Zms`).
+- Text report appended on each periodic/background flush.
 
 ## Common errors
 
