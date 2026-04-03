@@ -63,7 +63,7 @@ object MethodTraceRuntime {
         if (startNanos == 0L) return
 
         val state = threadState.get() ?: return
-        val node = state.stack.removeLastOrNull() ?: return
+        val node = state.stack.pollLast() ?: return
         node.durationNs = (SystemClock.elapsedRealtimeNanos() - node.startNs).coerceAtLeast(0L)
 
         if (state.stack.isNotEmpty()) {
@@ -133,7 +133,7 @@ object MethodTraceRuntime {
     }
 
     private fun acquireNode(state: ThreadTraceState, methodId: String, startNs: Long): TraceNode {
-        val node = state.nodePool.removeLastOrNull() ?: TraceNode(methodId)
+        val node = state.nodePool.pollLast() ?: TraceNode(methodId)
         node.methodId = methodId
         node.startNs = startNs
         node.durationNs = 0L
