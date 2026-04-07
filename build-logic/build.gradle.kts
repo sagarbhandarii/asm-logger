@@ -16,6 +16,7 @@ repositories {
 dependencies {
     compileOnly("com.android.tools.build:gradle:8.5.2")
     implementation("org.ow2.asm:asm-commons:9.6")
+    testImplementation(kotlin("test"))
 }
 
 gradlePlugin {

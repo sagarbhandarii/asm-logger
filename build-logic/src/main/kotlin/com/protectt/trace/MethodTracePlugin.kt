@@ -24,6 +24,7 @@ class MethodTracePlugin : Plugin<Project> {
             val runtimeClassName = resolveRuntimeClassName(namespace, extension)
             val isLibraryModule = project.plugins.hasPlugin("com.android.library")
             val allowDependencyInstrumentation = extension.includeThirdPartySdks && !isLibraryModule
+            val activeProbeIds = ProbeRegistry().activeProbeIds(ProbeSelectionConfig.fromExtension(extension))
 
             if (extension.includeThirdPartySdks && isLibraryModule) {
                 project.logger.warn(
@@ -43,9 +44,20 @@ class MethodTracePlugin : Plugin<Project> {
                 params.includePackagePrefixes.set(project.provider { includePrefixes })
                 params.excludeClassPrefixes.set(project.provider { excludePrefixes })
                 params.runtimeClassName.set(project.provider { runtimeClassName })
+                params.activeProbeIds.set(project.provider { activeProbeIds })
+                params.probeConfigValues.set(project.provider { resolveProbeConfig(extension) })
             }
             variant.instrumentation.setAsmFramesComputationMode(FramesComputationMode.COPY_FRAMES)
         }
+    }
+
+    private fun resolveProbeConfig(extension: MethodTraceExtension): Map<String, String> {
+        val core = mapOf(
+            "method.startupWindowMs" to extension.startupWindowMs.toString(),
+            "method.logEachCall" to extension.logEachCall.toString(),
+            "method.captureThreadName" to extension.captureThreadName.toString(),
+        )
+        return core + extension.probeConfigs
     }
 
     private fun registerFetchReportTask(project: Project, extension: MethodTraceExtension) {
