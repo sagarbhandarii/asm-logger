@@ -2,6 +2,15 @@ package com.protectt.trace
 
 open class MethodTraceExtension {
     var enabled: Boolean = true
+
+    /**
+     * Probe toggles. Method timing remains the default active probe.
+     */
+    var methodProbeEnabled: Boolean = true
+    var networkProbeEnabled: Boolean = false
+    var dbProbeEnabled: Boolean = false
+    var coroutineProbeEnabled: Boolean = false
+
     /**
      * When true, instrument classes coming from external dependencies as well.
      * This is required to capture timings for third-party SDK methods.
@@ -33,6 +42,11 @@ open class MethodTraceExtension {
     var captureThreadName: Boolean = true
 
     /**
+     * Future-proof configuration handoff for upcoming probes.
+     */
+    var probeConfigs: Map<String, String> = emptyMap()
+
+    /**
      * Package id used by `adb shell run-as <package>` for pulling runtime JSON.
      */
     var reportApplicationId: String = ""
@@ -48,4 +62,3 @@ open class MethodTraceExtension {
      */
     var reportFetchWaitSeconds: Int = 1
 }
-
