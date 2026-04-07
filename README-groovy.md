@@ -76,11 +76,23 @@ Runtime emits:
 - Logcat timing lines (`MethodTrace`)
 - JSON report file (`methodtrace-report.json`)
 
-## 6) Fetch JSON from device
+## 6) Fetch JSON + Top 10 issues from device
+
+Run the app once (so runtime can write data), then execute:
 
 ```bash
 ./gradlew :<module>:fetchMethodTraceReport
 ```
+
+Generated files are written in the **project root**:
+
+- `methodtrace-<timestamp>.json`
+- `methodtrace-<timestamp>.md`
+- `top10-issues.json`
+- `top10-issues.md`
+- `top10-issues.html`
+
+If Top 10 files are not generated, the fetched payload likely does not contain summary metrics yet.
 
 ## 7) Troubleshooting
 

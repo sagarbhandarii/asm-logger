@@ -94,7 +94,17 @@ ProtecttSdk.init(this)
 
 Example payload format: see `integration-steps.json`.
 
-## 8) Fetch report from device
+## 8) Fetch report + Top 10 issues from device
+
+Before fetching, make sure the app has generated runtime data:
+
+```bash
+./gradlew :app:assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n <applicationId>/<launcherActivity>
+```
+
+Then fetch and generate local summaries:
 
 ```bash
 ./gradlew :<module>:fetchMethodTraceReport
@@ -103,7 +113,14 @@ Example payload format: see `integration-steps.json`.
 This task uses:
 
 - `adb shell run-as <applicationId> cat <reportDevicePath>`
-- Writes `methodtrace-<timestamp>.json` to project root.
+- Writes files in **project root** (not under `build/`):
+  - `methodtrace-<timestamp>.json`
+  - `methodtrace-<timestamp>.md` (hotspot summary)
+  - `top10-issues.json`
+  - `top10-issues.md`
+  - `top10-issues.html`
+
+If `top10-issues.*` is missing, the pulled report likely has only raw events and no method summary fields yet (for example no `methods[*].p95Ns` and no `methodSummaries`).
 
 ## 9) Common issues
 
