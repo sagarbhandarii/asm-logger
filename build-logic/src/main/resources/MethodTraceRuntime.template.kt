@@ -293,7 +293,7 @@ object MethodTraceRuntime {
 
     private fun popAndComputeSelfNs(methodId: String, startNs: Long, durationNs: Long): Long {
         val stack = getOrCreateThreadState().callStack
-        val frame = stack.removeLastOrNull()
+        val frame = if (stack.isEmpty()) null else stack.removeLast()
         if (frame == null) return durationNs
 
         val selfNs = if (frame.methodId == methodId && frame.startNs == startNs) {

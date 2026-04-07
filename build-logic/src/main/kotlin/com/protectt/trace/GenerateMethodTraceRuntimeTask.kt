@@ -21,17 +21,25 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
 
     @TaskAction
     fun generate() {
-        val packageName = "${namespace.get()}.trace"
+          val packageName = "${namespace.get()}.trace"
         val packagePath = packageName.replace('.', '/')
+           val packageOutputDir = File(outputDir.get().asFile, packagePath)
         val templates = runtimeTemplates.get().toSortedMap()
         check(templates.isNotEmpty()) { "MethodTrace runtime template is missing" }
-
-        templates.forEach { (templateName, templateSource) ->
+        if (packageOutputDir.exists()) {
+            packageOutputDir.deleteRecursively()
+        }
+              templates.forEach { (templateName, templateSource) ->
             val outputFileName = templateName.substringBefore(".template")
-            val targetFile = File(outputDir.get().asFile, "$packagePath/$outputFileName")
+            val targetFile = File(packageOutputDir, outputFileName)
             targetFile.parentFile.mkdirs()
             targetFile.writeText(runtimeSource(templateSource, packageName))
         }
+              private fun runtimeSource(templateSource: String, packageName: String): String {
+        return templateSource.replace("__PACKAGE__", packageName)
+   
+    }
+
     }
 
     private fun runtimeSource(templateSource: String, packageName: String): String {
