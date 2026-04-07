@@ -92,11 +92,18 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
         outDir.mkdirs()
         val outFile = outDir.resolve("methodtrace-$ts.json")
         val mdFile = outDir.resolve("methodtrace-$ts.md")
+        val issuesJsonFile = outDir.resolve("top10-issues.json")
+        val issuesMdFile = outDir.resolve("top10-issues.md")
 
         if (summaryMethods.isNotEmpty()) {
             val enhancement = buildHotspotEnhancement(root = root, summaryMethods = summaryMethods)
             root["rankings"] = enhancement.rankings
             mdFile.writeText(enhancement.markdownSummary)
+
+            val issues = IssueAnalyzer(topN = 10).analyze(root = root, summaryMethods = summaryMethods)
+            root["topIssues"] = issues.issues.map { it.toMap() }
+            issuesJsonFile.writeText(issues.toJson())
+            issuesMdFile.writeText(issues.toMarkdown())
         }
 
         outFile.writeText(JsonOutput.prettyPrint(JsonOutput.toJson(root)))
@@ -104,6 +111,12 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
         logger.lifecycle("[methodTrace] Saved sorted report: ${outFile.absolutePath}")
         if (mdFile.exists()) {
             logger.lifecycle("[methodTrace] Saved hotspot markdown summary: ${mdFile.absolutePath}")
+        }
+        if (issuesJsonFile.exists()) {
+            logger.lifecycle("[methodTrace] Saved Top 10 issues JSON: ${issuesJsonFile.absolutePath}")
+        }
+        if (issuesMdFile.exists()) {
+            logger.lifecycle("[methodTrace] Saved Top 10 issues markdown: ${issuesMdFile.absolutePath}")
         }
     }
 
