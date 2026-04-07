@@ -9,7 +9,6 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.ViewTreeObserver
 import java.io.File
-import java.io.RandomAccessFile
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 import java.util.Random
@@ -52,6 +51,7 @@ object MethodTraceRuntime {
     private val processStartMs = SystemClock.elapsedRealtime()
     private val traceStartNs = SystemClock.elapsedRealtimeNanos()
     private val traceId = buildTraceId()
+    private val sessionId = buildTraceId()
     private val startupProfiler = StartupProfiler(
         processStartMs = processStartMs,
         startupWindowMsProvider = { startupWindowMs },
@@ -70,13 +70,6 @@ object MethodTraceRuntime {
     private const val DEFAULT_OUTPUT_PATH = "/sdcard/method_trace.json"
     private const val SUMMARY_FILE_NAME = "methodtrace-summary.json"
 
-    private const val TRACE_HEADER = "{\"traceEvents\":[\n"
-    private const val TRACE_FOOTER = "\n]}"
-    private const val COMMA_NEWLINE = ",\n"
-
-    private val TRACE_HEADER_BYTES = TRACE_HEADER.toByteArray(Charsets.UTF_8)
-    private val TRACE_FOOTER_BYTES = TRACE_FOOTER.toByteArray(Charsets.UTF_8)
-    private val COMMA_NEWLINE_BYTES = COMMA_NEWLINE.toByteArray(Charsets.UTF_8)
 
     private data class CallFrame(
         val methodId: String,
@@ -97,6 +90,7 @@ object MethodTraceRuntime {
 
     private val aggregateTracker = MethodAggregateTracker()
     private val frameJankTracker = FrameJankTracker()
+    private val stallTracker = MainThreadStallTracker()
     private val summaryDirty = AtomicBoolean(false)
     private val summaryFlushQueued = AtomicBoolean(false)
     private val exceptionTracker = ExceptionCorrelationTracker(
@@ -111,6 +105,7 @@ object MethodTraceRuntime {
     private val asyncFlushQueued = AtomicBoolean(false)
     private val coroutineIdSeq = AtomicLong(0L)
     private val coroutineTracker = CoroutineTraceTracker()
+    private val transactionContextState = ThreadLocal<String?>()
 
     private class CoroutineTraceContextElement internal constructor(
         internal val scope: CoroutineTraceTracker.Scope,
@@ -139,22 +134,54 @@ object MethodTraceRuntime {
     private var frameMetricsCollector: FrameMetricsCollector? = null
 
     @Volatile
-    private var traceFileInitialized = false
-
-    @Volatile
-    private var writtenEventCount: Long = 0L
-
-    @Volatile
     private var outputFilePathOverride: String? = null
+
+    @Volatile
+    private var traceSink: TraceSink = JsonTraceSink { resolveOutputFile() }
 
     @JvmStatic
     fun setOutputFilePath(path: String?) {
         outputFilePathOverride = path?.trim()?.takeIf { it.isNotEmpty() }
+        traceSink = JsonTraceSink { resolveOutputFile() }
+    }
+
+    @JvmStatic
+    fun setTraceSink(sink: TraceSink?) {
+        traceSink = sink ?: JsonTraceSink { resolveOutputFile() }
+    }
+
+    @JvmStatic
+    fun currentSessionContext(): TraceSessionContext {
+        val correlation = currentCorrelationContext()
+        return TraceSessionContext(
+            traceId = correlation.traceId,
+            sessionId = correlation.sessionId,
+            transactionId = correlation.transactionId,
+            activeSpanId = correlation.activeSpanId,
+        )
+    }
+
+    @JvmStatic
+    fun adoptSessionContext(context: TraceSessionContext?) {
+        transactionContextState.set(context?.transactionId)
+    }
+
+    @JvmStatic
+    fun beginTransaction(transactionId: String): TraceSessionContext {
+        val normalized = transactionId.trim().ifEmpty { "tx-${SystemClock.elapsedRealtimeNanos()}" }
+        transactionContextState.set(normalized)
+        return currentSessionContext()
+    }
+
+    @JvmStatic
+    fun clearTransaction() {
+        transactionContextState.set(null)
     }
 
     @JvmStatic
     fun useAppInternalFiles(application: Application, fileName: String = "methodtrace-report.json") {
         outputFilePathOverride = File(application.filesDir, fileName).absolutePath
+        traceSink = JsonTraceSink { resolveOutputFile() }
     }
 
     @JvmStatic
@@ -404,7 +431,7 @@ object MethodTraceRuntime {
         val batch = drainEvents(limit.coerceAtLeast(1))
         if (batch.isNotEmpty()) {
             runCatching {
-                appendEventsToTraceFile(batch)
+                traceSink.appendEvents(batch)
             }.onFailure {
                 Log.w(TAG, "Failed to flush trace events ($reason): ${it.message}")
             }
@@ -465,32 +492,6 @@ object MethodTraceRuntime {
         }
     }
 
-    private fun appendEventsToTraceFile(events: List<String>) {
-        val traceFile = resolveOutputFile()
-        traceFile.parentFile?.mkdirs()
-
-        RandomAccessFile(traceFile, "rw").use { raf ->
-            if (!traceFileInitialized) {
-                raf.setLength(0)
-                raf.write(TRACE_HEADER_BYTES)
-                raf.write(TRACE_FOOTER_BYTES)
-                traceFileInitialized = true
-                writtenEventCount = 0L
-            }
-
-            val insertionOffset = (raf.length() - TRACE_FOOTER_BYTES.size).coerceAtLeast(TRACE_HEADER_BYTES.size.toLong())
-            raf.seek(insertionOffset)
-
-            if (writtenEventCount > 0) {
-                raf.write(COMMA_NEWLINE_BYTES)
-            }
-
-            raf.write(events.joinToString(separator = ",\n").toByteArray(Charsets.UTF_8))
-            raf.write(TRACE_FOOTER_BYTES)
-            writtenEventCount += events.size
-        }
-    }
-
     private fun appendSummaryToFile(
         snapshot: MethodAggregateTracker.SummarySnapshot,
         exceptions: List<CorrelatedException>,
@@ -505,12 +506,24 @@ object MethodTraceRuntime {
         startupSummary: StartupSummary,
         exceptions: List<CorrelatedException>,
     ): String {
-        return buildString(methodSnapshot.methods.size * 192 + startupSummary.markers.size * 64 + 256) {
+        val frameSnapshot = frameJankTracker.snapshot()
+        val stallSnapshot = stallTracker.snapshot()
+        val anrRisk = AnrRiskScorer.compute(
+            startup = startupSummary,
+            frameSummary = frameSnapshot,
+            methodSummary = methodSnapshot,
+            stallSummary = stallSnapshot,
+        )
+
+        return buildString(methodSnapshot.methods.size * 192 + startupSummary.markers.size * 64 + 512) {
             append('{')
             append("\"generatedAtEpochMs\":").append(methodSnapshot.generatedAtEpochMs).append(',')
             append("\"startup\":").append(startupSummary.toJson()).append(',')
-            append("\"frames\":").append(frameJankTracker.snapshot().toJson()).append(',')
+            append("\"frames\":").append(frameSnapshot.toJson()).append(',')
+            append("\"mainThreadStalls\":").append(stallSnapshot.toJson()).append(',')
+            append("\"anrRisk\":").append(anrRisk.toJson()).append(',')
             append("\"exceptions\":").append(exceptionsToJson(exceptions)).append(',')
+            append("\"traceContext\":{\"traceId\":\"").append(traceId).append("\",\"sessionId\":\"").append(sessionId).append("\"},")
             append("\"methods\":[")
             methodSnapshot.methods.forEachIndexed { index, summary ->
                 if (index > 0) append(',')
@@ -578,6 +591,8 @@ object MethodTraceRuntime {
         val coroutineScope = coroutineScopeState.get()
         return TraceCorrelationContext(
             traceId = traceId,
+            sessionId = sessionId,
+            transactionId = transactionContextState.get(),
             activeSpanId = coroutineScope?.parentSpanId ?: activeMethodByThreadId[thread.id],
             threadId = thread.id,
             threadName = thread.name,
@@ -677,6 +692,7 @@ object MethodTraceRuntime {
                 activeMethodByThreadId[mainThreadId]
             },
             onStall = { stall ->
+                stallTracker.record(stall)
                 maybeLogMainThreadStall(stall)
                 enqueueEventJson(
                     buildMainThreadStallEventJson(
