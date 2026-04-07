@@ -2,6 +2,7 @@ package com.protectt.sdk.trace
 
 import android.app.Activity
 import android.app.Application
+import android.os.Handler
 import android.os.Bundle
 import android.os.Looper
 import android.os.SystemClock
@@ -9,6 +10,7 @@ import android.util.Log
 import java.io.File
 import java.io.RandomAccessFile
 import java.util.ArrayDeque
+import java.util.concurrent.ConcurrentHashMap
 import java.util.Random
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -36,6 +38,7 @@ object MethodTraceRuntime {
     private const val MAIN_WARN_THRESHOLD_MS = 100L
     private const val MAIN_CRITICAL_THRESHOLD_MS = 300L
     private const val MAIN_WARN_THRESHOLD_NS = MAIN_WARN_THRESHOLD_MS * 1_000_000L
+    private const val MAIN_STALL_HEARTBEAT_MS = 50L
 
     private const val INITIAL_BUFFER_CAPACITY = 2_048
     private const val MAX_BUFFERED_EVENTS = 4_096
@@ -64,6 +67,7 @@ object MethodTraceRuntime {
     )
 
     private val threadState = ThreadLocal<ThreadTraceState>()
+    private val activeMethodByThreadId = ConcurrentHashMap<Long, String>()
     private val bufferLock = Any()
     private val pendingEvents = ArrayDeque<String>(INITIAL_BUFFER_CAPACITY)
 
@@ -78,6 +82,8 @@ object MethodTraceRuntime {
 
     @Volatile
     private var scheduler: ScheduledExecutorService? = null
+    @Volatile
+    private var mainThreadStallDetector: MainThreadBlockDetector? = null
 
     @Volatile
     private var traceFileInitialized = false
@@ -104,6 +110,7 @@ object MethodTraceRuntime {
         val startNs = SystemClock.elapsedRealtimeNanos()
         val state = getOrCreateThreadState()
         state.callStack.addLast(CallFrame(methodId = methodId, startNs = startNs))
+        activeMethodByThreadId[Thread.currentThread().id] = methodId
         return startNs
     }
 
@@ -116,6 +123,7 @@ object MethodTraceRuntime {
         maybeLogMainThreadSlowCall(methodId, durationNs)
 
         val selfNs = popAndComputeSelfNs(methodId = methodId, startNs = startNanos, durationNs = durationNs)
+        updateActiveMethodForCurrentThread()
         aggregateTracker.record(
             methodId = methodId,
             durationNs = durationNs,
@@ -143,18 +151,24 @@ object MethodTraceRuntime {
     fun installLifecycleFlush(application: Application, intervalSeconds: Long = flushIntervalSeconds) {
         flushIntervalSeconds = intervalSeconds.coerceAtLeast(1L)
         startPeriodicFlush()
+        ensureMainThreadStallDetector()
+        mainThreadStallDetector?.start()
 
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             private var startedCount = 0
 
             override fun onActivityStarted(activity: Activity) {
                 startedCount += 1
+                if (startedCount == 1) {
+                    mainThreadStallDetector?.resume()
+                }
             }
 
             override fun onActivityStopped(activity: Activity) {
                 startedCount -= 1
                 if (startedCount <= 0) {
                     startedCount = 0
+                    mainThreadStallDetector?.pause()
                     flushNow("app_background")
                 }
             }
@@ -188,6 +202,8 @@ object MethodTraceRuntime {
     fun stopPeriodicFlush() {
         scheduler?.shutdownNow()
         scheduler = null
+        mainThreadStallDetector?.stop()
+        mainThreadStallDetector = null
     }
 
     @JvmStatic
@@ -328,6 +344,94 @@ object MethodTraceRuntime {
         return sb.toString()
     }
 
+    private fun ensureMainThreadStallDetector() {
+        if (mainThreadStallDetector != null) return
+        val mainHandler = Handler(Looper.getMainLooper())
+        val watchdogScheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "method-trace-main-stall-watchdog").apply { isDaemon = true }
+        }
+        val schedulerAdapter = object : RepeatingScheduler {
+            override fun scheduleAtFixedRate(initialDelayMs: Long, periodMs: Long, task: () -> Unit): RepeatingTask {
+                val future = watchdogScheduler.scheduleAtFixedRate(
+                    task,
+                    initialDelayMs,
+                    periodMs,
+                    TimeUnit.MILLISECONDS,
+                )
+                return object : RepeatingTask {
+                    override fun cancel() {
+                        future.cancel(true)
+                        watchdogScheduler.shutdownNow()
+                    }
+                }
+            }
+        }
+
+        mainThreadStallDetector = MainThreadBlockDetector(
+            heartbeatIntervalMs = MAIN_STALL_HEARTBEAT_MS,
+            clockMs = { SystemClock.elapsedRealtime() },
+            scheduler = schedulerAdapter,
+            postHeartbeat = { runnable -> mainHandler.post(runnable) },
+            activeMethodProvider = {
+                val mainThreadId = Looper.getMainLooper().thread.id
+                activeMethodByThreadId[mainThreadId]
+            },
+            onStall = { stall ->
+                maybeLogMainThreadStall(stall)
+                enqueueEventJson(
+                    buildMainThreadStallEventJson(
+                        stall = stall,
+                        tsUs = ((SystemClock.elapsedRealtimeNanos() - traceStartNs).coerceAtLeast(0L) / 1_000L),
+                    ),
+                )
+            },
+        )
+    }
+
+    private fun updateActiveMethodForCurrentThread() {
+        val threadId = Thread.currentThread().id
+        val method = getOrCreateThreadState().callStack.lastOrNull()?.methodId
+        if (method == null) {
+            activeMethodByThreadId.remove(threadId)
+        } else {
+            activeMethodByThreadId[threadId] = method
+        }
+    }
+
+    private fun buildMainThreadStallEventJson(stall: MainThreadStallEvent, tsUs: Long): String {
+        val sb = getOrCreateThreadState().jsonBuilder
+        sb.setLength(0)
+        val mainThreadId = Looper.getMainLooper().thread.id
+
+        sb.append('{')
+            .append("\"name\":\"main_thread_stall\",")
+            .append("\"cat\":\"runtime\",")
+            .append("\"ph\":\"i\",")
+            .append("\"s\":\"t\",")
+            .append("\"ts\":").append(tsUs).append(',')
+            .append("\"pid\":0,")
+            .append("\"tid\":").append(mainThreadId).append(',')
+            .append("\"args\":{")
+            .append("\"durationMs\":").append(stall.durationMs).append(',')
+            .append("\"severity\":\"").append(stall.severity.label).append('"')
+
+        stall.activeMethodId?.let {
+            sb.append(',').append("\"activeMethod\":\"").append(escapeJson(formatMethodId(it))).append('"')
+        }
+        sb.append("}}")
+        return sb.toString()
+    }
+
+    private fun enqueueEventJson(eventJson: String) {
+        val shouldScheduleFlush = synchronized(bufferLock) {
+            pendingEvents.addLast(eventJson)
+            pendingEvents.size >= MAX_BUFFERED_EVENTS
+        }
+        if (shouldScheduleFlush) {
+            queueAsyncFlush()
+        }
+    }
+
     private fun resolveOutputFile(): File {
         return File(outputFilePathOverride ?: DEFAULT_OUTPUT_PATH)
     }
@@ -373,6 +477,23 @@ object MethodTraceRuntime {
             return
         }
         Log.w(TAG, "[MAIN][WARN] Method ${formatMethodId(methodId)} took ${durationMs}ms")
+    }
+
+    private fun maybeLogMainThreadStall(stall: MainThreadStallEvent) {
+        val activeMethod = stall.activeMethodId?.let { formatMethodId(it) }
+        val suffix = if (activeMethod != null) " (active=$activeMethod)" else ""
+        when (stall.severity) {
+            MainThreadStallSeverity.CRITICAL -> {
+                Log.e(TAG, "[MAIN][STALL][CRITICAL] ${stall.durationMs}ms$suffix")
+            }
+            MainThreadStallSeverity.ELEVATED -> {
+                Log.w(TAG, "[MAIN][STALL][ELEVATED] ${stall.durationMs}ms$suffix")
+            }
+            MainThreadStallSeverity.WARNING -> {
+                Log.w(TAG, "[MAIN][STALL][WARN] ${stall.durationMs}ms$suffix")
+            }
+            MainThreadStallSeverity.NONE -> Unit
+        }
     }
 
     private fun isMainThread(): Boolean {
