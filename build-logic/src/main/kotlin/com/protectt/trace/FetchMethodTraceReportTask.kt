@@ -75,9 +75,28 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
         val methods = (root["methods"] as? List<*>)
             ?.mapNotNull { it as? MutableMap<String, Any?> }
             .orEmpty()
-            .sortedByDescending { (it["totalNs"] as? Number)?.toLong() ?: 0L }
+        if (methods.isNotEmpty()) {
+            root["methods"] = methods.sortedByDescending { (it["totalNs"] as? Number)?.toLong() ?: 0L }
+        }
 
-        root["methods"] = methods
+        val summaryMethods = (root["methods"] as? List<*>)
+            ?.mapNotNull { it as? MutableMap<String, Any?> }
+            .orEmpty()
+            .takeIf { list -> list.any { it.containsKey("p95Ns") } }
+            ?: (root["methodSummaries"] as? List<*>)
+                ?.mapNotNull { it as? MutableMap<String, Any?> }
+                .orEmpty()
+
+        if (summaryMethods.isNotEmpty()) {
+            root["rankings"] = mutableMapOf<String, Any?>(
+                "byP95" to summaryMethods.sortedByDescending { (it["p95Ns"] as? Number)?.toLong() ?: 0L },
+                "byTotalNs" to summaryMethods.sortedByDescending { (it["totalNs"] as? Number)?.toLong() ?: 0L },
+                "byMaxNs" to summaryMethods.sortedByDescending { (it["maxNs"] as? Number)?.toLong() ?: 0L },
+                "byMainThreadTotalNs" to summaryMethods.sortedByDescending {
+                    (it["mainThreadTotalNs"] as? Number)?.toLong() ?: 0L
+                },
+            )
+        }
 
         val ts = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").format(LocalDateTime.now())
         val outDir = outputDir.get().asFile
