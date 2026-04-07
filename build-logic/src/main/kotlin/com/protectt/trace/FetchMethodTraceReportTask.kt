@@ -50,13 +50,13 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
         if (remote.isEmpty()) throw GradleException("methodTrace.reportDevicePath is required")
 
         val candidatePaths = buildRemotePathCandidates(remote)
-        var rawOutput: String? = null
+        var fetchedRawOutput: String? = null
         val failures = mutableListOf<String>()
         var resolvedRemotePath: String? = null
         for (candidate in candidatePaths) {
             val attempt = fetchFromDevice(pkg = pkg, remotePath = candidate)
             if (attempt.exitValue == 0) {
-                rawOutput = attempt.output
+                fetchedRawOutput = attempt.output
                 resolvedRemotePath = candidate
                 break
             }
@@ -64,7 +64,7 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
             failures += "path=$candidate error=$error"
         }
 
-        if (rawOutput == null) {
+        if (fetchedRawOutput == null) {
             val failureSummary = failures.joinToString(separator = " | ")
             throw GradleException(
                 "Failed to fetch MethodTrace report from device. " +
@@ -79,7 +79,7 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
             )
         }
 
-        val rawOutput = rawOutput
+        val rawOutput = fetchedRawOutput ?: throw GradleException("Fetched report unexpectedly missing for package=$pkg")
         if (rawOutput.isBlank()) {
             val pathHint = resolvedRemotePath ?: remote
             throw GradleException("Fetched report is empty for package=$pkg path=$pathHint")
