@@ -9,6 +9,10 @@ internal enum class IssueCategory(val value: String) {
     HIGH_CUMULATIVE_COST("high_cumulative_cost"),
     MAIN_THREAD_BLOCKING("main_thread_blocking"),
     STARTUP_BOTTLENECK("startup_bottleneck"),
+    EXCEPTION_CORRELATED_SLOW_PATH("exception_correlated_slow_path"),
+    NETWORK_LATENCY_HOTSPOT("network_latency_hotspot"),
+    DB_QUERY_BOTTLENECK("db_query_bottleneck"),
+    CORRELATED_PERFORMANCE_CLUSTER("correlated_performance_cluster"),
 }
 
 internal enum class IssueSeverity(val value: String) {
@@ -30,6 +34,9 @@ internal data class Issue(
     val category: IssueCategory,
     val severity: IssueSeverity,
     val summary: String,
+    val probableRootCause: String,
+    val recommendedFix: String,
+    val relatedSignals: List<Map<String, Any?>>,
     val evidence: Map<String, Any?>,
     val affected: AffectedTarget,
     val confidenceScore: Double,
@@ -42,6 +49,9 @@ internal data class Issue(
             "category" to category.value,
             "severity" to severity.value,
             "summary" to summary,
+            "probableRootCause" to probableRootCause,
+            "recommendedFix" to recommendedFix,
+            "relatedSignals" to relatedSignals,
             "evidence" to evidence,
             "affected" to mapOf(
                 "component" to affected.component,
@@ -80,6 +90,11 @@ internal data class IssueAnalysisResult(
                 appendLine("- **Confidence:** ${issue.confidenceScore}")
                 appendLine("- **Affected:** `${issue.affected.className}#${issue.affected.method}`")
                 appendLine("- **Summary:** ${issue.summary}")
+                appendLine("- **Probable root cause:** ${issue.probableRootCause}")
+                appendLine("- **Recommended fix:** ${issue.recommendedFix}")
+                if (issue.relatedSignals.isNotEmpty()) {
+                    appendLine("- **Related signals:** `${issue.relatedSignals}`")
+                }
                 appendLine("- **Evidence:** `${issue.evidence}`")
                 appendLine()
             }
@@ -104,13 +119,17 @@ internal class IssueAnalyzer(
         HighCumulativeCostDetector(),
         MainThreadBlockingDetector(),
         StartupBottleneckDetector(),
+        ExceptionCorrelatedSlowPathDetector(),
+        NetworkLatencyHotspotDetector(),
+        DbQueryBottleneckDetector(),
     )
 
     fun analyze(root: Map<String, Any?>, summaryMethods: List<Map<String, Any?>>): IssueAnalysisResult {
         val context = DetectionContext(root = root, methods = summaryMethods)
         val raw = detectors.flatMap { it.detect(context) }
-        val deduped = raw
-            .groupBy { "${it.category.value}:${it.affected.className}:${it.affected.method}" }
+        val merged = mergeCorrelatedIssues(raw)
+        val deduped = merged
+            .groupBy { "${it.category.value}:${it.affected.className}:${it.affected.method}:${it.title}" }
             .map { (_, issues) -> issues.maxByOrNull { it.score }!! }
             .sortedWith(compareByDescending<Issue> { it.score }.thenByDescending { it.confidenceScore })
             .take(topN)
@@ -139,6 +158,9 @@ private class SlowMethodDetector : IssueDetector {
                 category = IssueCategory.SLOW_METHOD,
                 severity = severity,
                 summary = "Method shows elevated tail latency (p95/max).",
+                probableRootCause = "Method logic is latency-heavy in the tail path.",
+                recommendedFix = "Move blocking work off critical path, cache expensive calls, and reduce allocations.",
+                relatedSignals = emptyList(),
                 affected = affected,
                 score = score,
                 confidence = confidenceFromSignals(listOf(p95Ns > 0L, maxNs > 0L, metric(method, "callCount") > 3L)),
@@ -175,6 +197,9 @@ private class HighCumulativeCostDetector : IssueDetector {
                 category = IssueCategory.HIGH_CUMULATIVE_COST,
                 severity = severity,
                 summary = "Method contributes high total runtime cost across calls.",
+                probableRootCause = "Frequently invoked path with expensive operations.",
+                recommendedFix = "Reduce invocation frequency, memoize results, and split heavy logic.",
+                relatedSignals = emptyList(),
                 affected = affected,
                 score = score,
                 confidence = confidenceFromSignals(listOf(totalNs > 0L, calls > 10L)),
@@ -213,6 +238,9 @@ private class MainThreadBlockingDetector : IssueDetector {
                 category = IssueCategory.MAIN_THREAD_BLOCKING,
                 severity = severity,
                 summary = "Method is associated with main-thread cost and/or stall events.",
+                probableRootCause = "Long-running work is executing on the main thread.",
+                recommendedFix = "Shift work to background threads and keep UI handlers short.",
+                relatedSignals = listOf(mapOf("kind" to "main_thread_stall", "hits" to stallHits)),
                 affected = affected,
                 score = score,
                 confidence = confidenceFromSignals(listOf(mainThreadNs > 0L, stallHits > 0L, metric(method, "callCount") > 1L)),
@@ -250,6 +278,9 @@ private class StartupBottleneckDetector : IssueDetector {
                 category = IssueCategory.STARTUP_BOTTLENECK,
                 severity = severity,
                 summary = "Method contributes significantly during startup window.",
+                probableRootCause = "Startup path is doing heavy synchronous work.",
+                recommendedFix = "Defer non-critical initialization and parallelize startup tasks.",
+                relatedSignals = emptyList(),
                 affected = affected,
                 score = score,
                 confidence = confidenceFromSignals(listOf(startupNs > 0L, startupDurationMs > 0L, contribution > 0.05)),
@@ -264,10 +295,188 @@ private class StartupBottleneckDetector : IssueDetector {
     }
 }
 
+private class ExceptionCorrelatedSlowPathDetector : IssueDetector {
+    override fun detect(context: DetectionContext): List<Issue> {
+        val exceptionCountsByMethod = parseExceptionMethodCounts(context.root)
+        if (exceptionCountsByMethod.isEmpty()) return emptyList()
+
+        return context.methods.mapNotNull { method ->
+            val methodId = method["methodId"]?.toString().orEmpty()
+            val exceptionHits = exceptionCountsByMethod[methodId] ?: 0L
+            if (exceptionHits <= 0L) return@mapNotNull null
+
+            val p95Ns = metric(method, "p95Ns")
+            val maxNs = metric(method, "maxNs")
+            if (p95Ns < 40_000_000L && maxNs < 80_000_000L) return@mapNotNull null
+
+            val affected = parseAffected(methodId)
+            val score = (p95Ns / 1_000_000.0 * 1.1) + (maxNs / 1_000_000.0 * 0.7) + (exceptionHits * 55.0) + frequencyScore(method)
+            val severity = when {
+                exceptionHits >= 3L && (p95Ns >= 250_000_000L || maxNs >= 500_000_000L) -> IssueSeverity.CRITICAL
+                exceptionHits >= 2L || p95Ns >= 140_000_000L || maxNs >= 300_000_000L -> IssueSeverity.HIGH
+                exceptionHits >= 1L -> IssueSeverity.MEDIUM
+                else -> IssueSeverity.LOW
+            }
+
+            buildIssue(
+                title = "Exception-correlated slow path",
+                category = IssueCategory.EXCEPTION_CORRELATED_SLOW_PATH,
+                severity = severity,
+                summary = "Slow method appears in exception correlation spans.",
+                probableRootCause = "Method is both latency-heavy and failure-prone in the same execution paths.",
+                recommendedFix = "Harden error handling and optimize the method's I/O and compute hotspots.",
+                relatedSignals = listOf(
+                    mapOf("kind" to "exception", "count" to exceptionHits),
+                    mapOf("kind" to "method_latency", "p95Ns" to p95Ns, "maxNs" to maxNs),
+                ),
+                affected = affected,
+                score = score,
+                confidence = confidenceFromSignals(listOf(exceptionHits > 0L, p95Ns > 0L, maxNs > 0L)),
+                evidence = linkedMapOf(
+                    "methodId" to methodId,
+                    "exceptionHits" to exceptionHits,
+                    "p95Ns" to p95Ns,
+                    "maxNs" to maxNs,
+                    "callCount" to metric(method, "callCount"),
+                    "mergeKey" to methodId,
+                ),
+            )
+        }
+    }
+}
+
+private class NetworkLatencyHotspotDetector : IssueDetector {
+    override fun detect(context: DetectionContext): List<Issue> {
+        val networkByMethod = parseNetworkLatencyByMethod(context.root)
+        return context.methods.mapNotNull { method ->
+            val methodId = method["methodId"]?.toString().orEmpty()
+            val bucket = networkByMethod[methodId] ?: return@mapNotNull null
+            if (bucket.calls < 2L) return@mapNotNull null
+            val avgNs = bucket.totalDurationNs / bucket.calls
+            if (bucket.maxDurationNs < 80_000_000L && avgNs < 40_000_000L) return@mapNotNull null
+
+            val affected = parseAffected(methodId)
+            val score =
+                (bucket.maxDurationNs / 1_000_000.0 * 0.9) +
+                    (avgNs / 1_000_000.0 * 0.8) +
+                    (bucket.calls * 6.0) +
+                    (bucket.failedCalls * 20.0)
+            val severity = when {
+                bucket.maxDurationNs >= 900_000_000L || bucket.failedCalls >= 4L -> IssueSeverity.CRITICAL
+                bucket.maxDurationNs >= 400_000_000L || bucket.failedCalls >= 2L -> IssueSeverity.HIGH
+                bucket.maxDurationNs >= 200_000_000L || avgNs >= 80_000_000L -> IssueSeverity.MEDIUM
+                else -> IssueSeverity.LOW
+            }
+
+            val topEndpoints = bucket.endpointCounts.entries
+                .sortedByDescending { it.value }
+                .take(3)
+                .map { (endpoint, count) -> mapOf("endpoint" to endpoint, "hits" to count) }
+
+            buildIssue(
+                title = "Network latency hotspot",
+                category = IssueCategory.NETWORK_LATENCY_HOTSPOT,
+                severity = severity,
+                summary = "Method frequently overlaps with slow network calls.",
+                probableRootCause = "API latency and/or retries are inflating end-to-end method latency.",
+                recommendedFix = "Reduce payloads, add caching/batching, and optimize slow endpoint behavior.",
+                relatedSignals = listOf(
+                    mapOf("kind" to "network", "calls" to bucket.calls, "failedCalls" to bucket.failedCalls),
+                    mapOf("kind" to "network_endpoints", "top" to topEndpoints),
+                ),
+                affected = affected,
+                score = score,
+                confidence = confidenceFromSignals(listOf(bucket.calls > 2L, bucket.maxDurationNs > 0L, methodId.isNotBlank())),
+                evidence = linkedMapOf(
+                    "methodId" to methodId,
+                    "networkCalls" to bucket.calls,
+                    "networkFailedCalls" to bucket.failedCalls,
+                    "networkTotalDurationNs" to bucket.totalDurationNs,
+                    "networkMaxDurationNs" to bucket.maxDurationNs,
+                    "networkAvgDurationNs" to avgNs,
+                    "mergeKey" to methodId,
+                ),
+            )
+        }
+    }
+}
+
+private class DbQueryBottleneckDetector : IssueDetector {
+    override fun detect(context: DetectionContext): List<Issue> {
+        val dbByMethod = parseDbLatencyByMethod(context.root)
+        return context.methods.mapNotNull { method ->
+            val methodId = method["methodId"]?.toString().orEmpty()
+            val bucket = dbByMethod[methodId] ?: return@mapNotNull null
+            if (bucket.calls < 2L) return@mapNotNull null
+
+            val avgNs = bucket.totalDurationNs / bucket.calls
+            if (bucket.maxDurationNs < 60_000_000L && (avgNs < 30_000_000L || bucket.calls < 4L)) return@mapNotNull null
+
+            val affected = parseAffected(methodId)
+            val score =
+                (bucket.maxDurationNs / 1_000_000.0 * 1.0) +
+                    (avgNs / 1_000_000.0 * 0.8) +
+                    (bucket.calls * 7.0) +
+                    (bucket.expensiveHits * 18.0)
+            val severity = when {
+                bucket.maxDurationNs >= 700_000_000L || bucket.expensiveHits >= 5L -> IssueSeverity.CRITICAL
+                bucket.maxDurationNs >= 300_000_000L || bucket.expensiveHits >= 3L -> IssueSeverity.HIGH
+                bucket.maxDurationNs >= 150_000_000L || bucket.calls >= 8L -> IssueSeverity.MEDIUM
+                else -> IssueSeverity.LOW
+            }
+
+            val topOps = bucket.operationCounts.entries
+                .sortedByDescending { it.value }
+                .take(3)
+                .map { (op, count) -> mapOf("operation" to op, "hits" to count) }
+
+            buildIssue(
+                title = "DB/query bottleneck",
+                category = IssueCategory.DB_QUERY_BOTTLENECK,
+                severity = severity,
+                summary = "Method is associated with slow or high-frequency DB work.",
+                probableRootCause = "Database query execution dominates method runtime.",
+                recommendedFix = "Index key columns, reduce query frequency, and optimize query plans.",
+                relatedSignals = listOf(
+                    mapOf("kind" to "db", "calls" to bucket.calls, "expensiveHits" to bucket.expensiveHits),
+                    mapOf("kind" to "db_operations", "top" to topOps),
+                ),
+                affected = affected,
+                score = score,
+                confidence = confidenceFromSignals(listOf(bucket.calls > 2L, bucket.maxDurationNs > 0L, methodId.isNotBlank())),
+                evidence = linkedMapOf(
+                    "methodId" to methodId,
+                    "dbCalls" to bucket.calls,
+                    "dbTotalDurationNs" to bucket.totalDurationNs,
+                    "dbMaxDurationNs" to bucket.maxDurationNs,
+                    "dbAvgDurationNs" to avgNs,
+                    "expensiveQueryHits" to bucket.expensiveHits,
+                    "mergeKey" to methodId,
+                ),
+            )
+        }
+    }
+}
+
+private data class NetworkAggregate(
+    val calls: Long = 0L,
+    val failedCalls: Long = 0L,
+    val totalDurationNs: Long = 0L,
+    val maxDurationNs: Long = 0L,
+    val endpointCounts: Map<String, Long> = emptyMap(),
+)
+
+private data class DbAggregate(
+    val calls: Long = 0L,
+    val expensiveHits: Long = 0L,
+    val totalDurationNs: Long = 0L,
+    val maxDurationNs: Long = 0L,
+    val operationCounts: Map<String, Long> = emptyMap(),
+)
+
 private fun parseMainThreadStallCounts(root: Map<String, Any?>): Map<String, Long> {
     val counts = linkedMapOf<String, Long>()
-    val events = (root["traceEvents"] as? List<*>)?.mapNotNull { it as? Map<*, *> }.orEmpty()
-    events.forEach { event ->
+    parseTraceEvents(root).forEach { event ->
         val name = event["name"]?.toString() ?: return@forEach
         if (name != "main_thread_stall") return@forEach
         val args = event["args"] as? Map<*, *> ?: return@forEach
@@ -277,11 +486,164 @@ private fun parseMainThreadStallCounts(root: Map<String, Any?>): Map<String, Lon
     return counts
 }
 
+private fun parseExceptionMethodCounts(root: Map<String, Any?>): Map<String, Long> {
+    val counts = linkedMapOf<String, Long>()
+    val exceptions = (root["exceptions"] as? List<*>)?.mapNotNull { it as? Map<*, *> }.orEmpty()
+    exceptions.forEach { event ->
+        val activeSpans = event["activeSpans"] as? List<*> ?: return@forEach
+        activeSpans.forEach { span ->
+            val raw = span?.toString() ?: return@forEach
+            val methodId = raw.substringAfter(':', missingDelimiterValue = "")
+            if (methodId.isBlank()) return@forEach
+            counts[methodId] = (counts[methodId] ?: 0L) + 1L
+        }
+    }
+    return counts
+}
+
+private fun parseNetworkLatencyByMethod(root: Map<String, Any?>): Map<String, NetworkAggregate> {
+    val totals = linkedMapOf<String, MutableNetworkAggregate>()
+    parseTraceEvents(root).forEach { event ->
+        val name = event["name"]?.toString() ?: return@forEach
+        if (!name.startsWith("network:")) return@forEach
+        val args = event["args"] as? Map<*, *> ?: return@forEach
+        val methodId = args["activeSpanId"]?.toString()?.takeIf { it.isNotBlank() } ?: return@forEach
+        val durationNs = eventDurationNs(event)
+        val endpoint = listOf(
+            args["host"]?.toString() ?: "unknown",
+            args["method"]?.toString() ?: "UNKNOWN",
+            args["pathTemplate"]?.toString() ?: "/",
+        ).joinToString(" ")
+        val failed = args["failed"] as? Boolean ?: false
+
+        val aggregate = totals.getOrPut(methodId) { MutableNetworkAggregate() }
+        aggregate.calls += 1
+        aggregate.totalDurationNs += durationNs
+        aggregate.maxDurationNs = maxOf(aggregate.maxDurationNs, durationNs)
+        if (failed) aggregate.failedCalls += 1
+        aggregate.endpointCounts[endpoint] = (aggregate.endpointCounts[endpoint] ?: 0L) + 1L
+    }
+
+    return totals.mapValues { (_, value) ->
+        NetworkAggregate(
+            calls = value.calls,
+            failedCalls = value.failedCalls,
+            totalDurationNs = value.totalDurationNs,
+            maxDurationNs = value.maxDurationNs,
+            endpointCounts = value.endpointCounts,
+        )
+    }
+}
+
+private fun parseDbLatencyByMethod(root: Map<String, Any?>): Map<String, DbAggregate> {
+    val totals = linkedMapOf<String, MutableDbAggregate>()
+    parseTraceEvents(root).forEach { event ->
+        val name = event["name"]?.toString() ?: return@forEach
+        if (!name.startsWith("db:")) return@forEach
+        val args = event["args"] as? Map<*, *> ?: return@forEach
+        val methodId = args["activeSpanId"]?.toString()?.takeIf { it.isNotBlank() } ?: return@forEach
+        val durationNs = eventDurationNs(event)
+        val operation = args["operation"]?.toString() ?: "UNKNOWN"
+
+        val aggregate = totals.getOrPut(methodId) { MutableDbAggregate() }
+        aggregate.calls += 1
+        aggregate.totalDurationNs += durationNs
+        aggregate.maxDurationNs = maxOf(aggregate.maxDurationNs, durationNs)
+        if (durationNs >= 75_000_000L) aggregate.expensiveHits += 1
+        aggregate.operationCounts[operation] = (aggregate.operationCounts[operation] ?: 0L) + 1L
+    }
+
+    return totals.mapValues { (_, value) ->
+        DbAggregate(
+            calls = value.calls,
+            expensiveHits = value.expensiveHits,
+            totalDurationNs = value.totalDurationNs,
+            maxDurationNs = value.maxDurationNs,
+            operationCounts = value.operationCounts,
+        )
+    }
+}
+
+private fun parseTraceEvents(root: Map<String, Any?>): List<Map<*, *>> {
+    return (root["traceEvents"] as? List<*>)?.mapNotNull { it as? Map<*, *> }.orEmpty()
+}
+
+private fun eventDurationNs(event: Map<*, *>): Long {
+    val durUs = (event["dur"] as? Number)?.toLong() ?: 0L
+    return (durUs * 1_000L).coerceAtLeast(0L)
+}
+
+private class MutableNetworkAggregate {
+    var calls: Long = 0L
+    var failedCalls: Long = 0L
+    var totalDurationNs: Long = 0L
+    var maxDurationNs: Long = 0L
+    val endpointCounts: MutableMap<String, Long> = linkedMapOf()
+}
+
+private class MutableDbAggregate {
+    var calls: Long = 0L
+    var expensiveHits: Long = 0L
+    var totalDurationNs: Long = 0L
+    var maxDurationNs: Long = 0L
+    val operationCounts: MutableMap<String, Long> = linkedMapOf()
+}
+
+private fun mergeCorrelatedIssues(raw: List<Issue>): List<Issue> {
+    val grouped = raw.groupBy { issue ->
+        issue.evidence["mergeKey"]?.toString()?.takeIf { it.isNotBlank() }
+            ?: "${issue.affected.className}#${issue.affected.method}"
+    }
+
+    val merged = mutableListOf<Issue>()
+    grouped.forEach { (_, issues) ->
+        val correlated = issues.filter {
+            it.category == IssueCategory.EXCEPTION_CORRELATED_SLOW_PATH ||
+                it.category == IssueCategory.NETWORK_LATENCY_HOTSPOT ||
+                it.category == IssueCategory.DB_QUERY_BOTTLENECK
+        }
+        if (correlated.size < 2) {
+            merged.addAll(issues)
+            return@forEach
+        }
+
+        val primary = correlated.maxByOrNull { it.score }!!
+        val combinedScore = correlated.sumOf { it.score } * 0.55
+        val combinedConfidence = round(correlated.map { it.confidenceScore }.average())
+        val topSeverity = correlated.maxByOrNull { it.severity.ordinal }?.severity ?: primary.severity
+        val signalKinds = correlated.map { it.category.value }
+
+        val cluster = buildIssue(
+            title = "Correlated I/O and exception hotspot",
+            category = IssueCategory.CORRELATED_PERFORMANCE_CLUSTER,
+            severity = topSeverity,
+            summary = "Multiple correlated signals point to the same problematic execution path.",
+            probableRootCause = "A shared method path is impacted by I/O latency and reliability issues.",
+            recommendedFix = "Prioritize this path for end-to-end optimization: network, DB, and exception hardening.",
+            relatedSignals = correlated.flatMap { it.relatedSignals } + listOf(mapOf("kind" to "correlated_categories", "values" to signalKinds)),
+            affected = primary.affected,
+            evidence = linkedMapOf(
+                "mergedIssueIds" to correlated.map { it.issueId },
+                "signalCategories" to signalKinds,
+                "mergeKey" to (primary.evidence["mergeKey"] ?: "unknown"),
+            ),
+            confidence = combinedConfidence,
+            score = combinedScore,
+        )
+        merged.add(cluster)
+        merged.addAll(issues.filterNot { it in correlated })
+    }
+    return merged
+}
+
 private fun buildIssue(
     title: String,
     category: IssueCategory,
     severity: IssueSeverity,
     summary: String,
+    probableRootCause: String,
+    recommendedFix: String,
+    relatedSignals: List<Map<String, Any?>>,
     affected: AffectedTarget,
     evidence: Map<String, Any?>,
     confidence: Double,
@@ -294,6 +656,9 @@ private fun buildIssue(
         category = category,
         severity = severity,
         summary = summary,
+        probableRootCause = probableRootCause,
+        recommendedFix = recommendedFix,
+        relatedSignals = relatedSignals,
         evidence = evidence,
         affected = affected,
         confidenceScore = confidence,
