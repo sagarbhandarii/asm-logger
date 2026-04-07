@@ -17,6 +17,10 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.ThreadContextElement
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 import kotlin.math.ceil
 
 object MethodTraceRuntime {
@@ -41,6 +45,9 @@ object MethodTraceRuntime {
     var networkTimingHookEnabled: Boolean = false
     @Volatile
     var dbTimingHookEnabled: Boolean = false
+
+    @Volatile
+    var coroutineTracingEnabled: Boolean = false
 
     private val processStartMs = SystemClock.elapsedRealtime()
     private val traceStartNs = SystemClock.elapsedRealtimeNanos()
@@ -83,6 +90,7 @@ object MethodTraceRuntime {
     )
 
     private val threadState = ThreadLocal<ThreadTraceState>()
+    private val coroutineScopeState = ThreadLocal<CoroutineTraceTracker.Scope?>()
     private val activeMethodByThreadId = ConcurrentHashMap<Long, String>()
     private val bufferLock = Any()
     private val pendingEvents = ArrayDeque<String>(INITIAL_BUFFER_CAPACITY)
@@ -101,6 +109,27 @@ object MethodTraceRuntime {
         Thread(runnable, "method-trace-writer").apply { isDaemon = true }
     }
     private val asyncFlushQueued = AtomicBoolean(false)
+    private val coroutineIdSeq = AtomicLong(0L)
+    private val coroutineTracker = CoroutineTraceTracker()
+
+    private class CoroutineTraceContextElement internal constructor(
+        internal val scope: CoroutineTraceTracker.Scope,
+    ) : ThreadContextElement<CoroutineTraceTracker.Scope?>,
+        AbstractCoroutineContextElement(Key) {
+        companion object Key : CoroutineContext.Key<CoroutineTraceContextElement>
+
+        override fun updateThreadContext(context: CoroutineContext): CoroutineTraceTracker.Scope? {
+            val previous = coroutineScopeState.get()
+            coroutineScopeState.set(scope)
+            onCoroutineResumed(scope, previous)
+            return previous
+        }
+
+        override fun restoreThreadContext(context: CoroutineContext, oldState: CoroutineTraceTracker.Scope?) {
+            onCoroutineSuspended(scope)
+            coroutineScopeState.set(oldState)
+        }
+    }
 
     @Volatile
     private var scheduler: ScheduledExecutorService? = null
@@ -126,6 +155,58 @@ object MethodTraceRuntime {
     @JvmStatic
     fun useAppInternalFiles(application: Application, fileName: String = "methodtrace-report.json") {
         outputFilePathOverride = File(application.filesDir, fileName).absolutePath
+    }
+
+    @JvmStatic
+    fun createCoroutineTraceContext(transactionName: String? = null): CoroutineContext.Element? {
+        if (!coroutineTracingEnabled || !enabled) return null
+        val thread = Thread.currentThread()
+        val id = coroutineIdSeq.incrementAndGet()
+        val scope = coroutineTracker.createScope(
+            id = id,
+            transaction = transactionName?.takeIf { it.isNotBlank() } ?: "coroutine-$id",
+            parentSpanId = activeMethodByThreadId[thread.id],
+            threadId = thread.id,
+        )
+        emitCoroutineTransition(
+            name = "coroutine_start",
+            scope = scope,
+            threadId = thread.id,
+            args = mapOf(
+                "transaction" to scope.transaction,
+                "parentSpan" to scope.parentSpanId,
+                "dispatcher" to (thread.name.takeIf { it.isNotEmpty() }),
+            ),
+        )
+        return CoroutineTraceContextElement(scope)
+    }
+
+    @JvmStatic
+    fun markCoroutineCompleted(cancelled: Boolean = false, error: Throwable? = null) {
+        if (!coroutineTracingEnabled || !enabled) return
+        val scope = coroutineScopeState.get() ?: return
+        val transition = if (cancelled) "coroutine_cancelled" else "coroutine_completed"
+        val completion = coroutineTracker.onCompletion(
+            scope = scope,
+            threadId = Thread.currentThread().id,
+            cancelled = cancelled,
+            error = error,
+        )
+        emitCoroutineTransition(
+            name = transition,
+            scope = scope,
+            threadId = Thread.currentThread().id,
+            args = mapOf(
+                "transaction" to scope.transaction,
+                "errorType" to completion.args["errorType"],
+                "errorMessage" to ((completion.args["errorMessage"] as? String)?.takeIf { !redactExceptionMessages }),
+            ),
+        )
+    }
+
+    @JvmStatic
+    fun markCoroutineCancelled(error: Throwable? = null) {
+        markCoroutineCompleted(cancelled = true, error = error)
     }
 
     @JvmStatic
@@ -494,9 +575,10 @@ object MethodTraceRuntime {
 
     internal fun currentCorrelationContext(): TraceCorrelationContext {
         val thread = Thread.currentThread()
+        val coroutineScope = coroutineScopeState.get()
         return TraceCorrelationContext(
             traceId = traceId,
-            activeSpanId = activeMethodByThreadId[thread.id],
+            activeSpanId = coroutineScope?.parentSpanId ?: activeMethodByThreadId[thread.id],
             threadId = thread.id,
             threadName = thread.name,
         )
@@ -842,6 +924,80 @@ object MethodTraceRuntime {
             }
             MainThreadStallSeverity.NONE -> Unit
         }
+    }
+
+    private fun onCoroutineResumed(scope: CoroutineTraceTracker.Scope, previous: CoroutineTraceTracker.Scope?) {
+        if (!coroutineTracingEnabled || !enabled) return
+        val thread = Thread.currentThread()
+        val (updatedScope, transitions) = coroutineTracker.onResume(
+            scope = scope,
+            threadId = thread.id,
+            dispatcher = thread.name,
+            restoredFrom = previous?.id,
+        )
+        coroutineScopeState.set(updatedScope)
+        transitions.forEach { transition ->
+            emitCoroutineTransition(
+                name = transition.name,
+                scope = transition.scope,
+                threadId = transition.threadId,
+                args = transition.args + mapOf("transaction" to transition.scope.transaction),
+            )
+        }
+    }
+
+    private fun onCoroutineSuspended(scope: CoroutineTraceTracker.Scope) {
+        if (!coroutineTracingEnabled || !enabled) return
+        val transition = coroutineTracker.onSuspend(scope, Thread.currentThread().id)
+        emitCoroutineTransition(
+            name = transition.name,
+            scope = transition.scope,
+            threadId = transition.threadId,
+            args = mapOf("transaction" to transition.scope.transaction),
+        )
+    }
+
+    private fun emitCoroutineTransition(
+        name: String,
+        scope: CoroutineTraceTracker.Scope,
+        threadId: Long,
+        args: Map<String, Any?>,
+    ) {
+        val sb = getOrCreateThreadState().jsonBuilder
+        sb.setLength(0)
+        val tsUs = ((SystemClock.elapsedRealtimeNanos() - traceStartNs).coerceAtLeast(0L) / 1_000L)
+        sb.append('{')
+            .append("\"name\":\"").append(name).append("\",")
+            .append("\"cat\":\"coroutine\",")
+            .append("\"ph\":\"i\",")
+            .append("\"s\":\"t\",")
+            .append("\"ts\":").append(tsUs).append(',')
+            .append("\"pid\":0,")
+            .append("\"tid\":").append(threadId).append(',')
+            .append("\"args\":{")
+            .append("\"coroutineId\":").append(scope.id).append(',')
+            .append("\"transaction\":\"").append(escapeJson(scope.transaction)).append('\"')
+
+        args.forEach { (key, value) ->
+            when (value) {
+                null -> Unit
+                is Number, is Boolean -> {
+                    sb.append(',').append("\"").append(escapeJson(key)).append("\":").append(value)
+                }
+                else -> {
+                    sb.append(',').append("\"").append(escapeJson(key)).append("\":\"")
+                        .append(escapeJson(value.toString()))
+                        .append('\"')
+                }
+            }
+        }
+
+        scope.parentSpanId?.let {
+            sb.append(',').append("\"parentSpan\":\"").append(escapeJson(it)).append('\"')
+        }
+        sb.append(',').append("\"parentThreadId\":").append(scope.parentThreadId)
+        sb.append("}}")
+        enqueueEventJson(sb.toString())
     }
 
     private fun isMainThread(): Boolean {
