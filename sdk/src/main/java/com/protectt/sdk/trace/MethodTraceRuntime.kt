@@ -37,9 +37,14 @@ object MethodTraceRuntime {
 
     @Volatile
     var redactExceptionMessages: Boolean = true
+    @Volatile
+    var networkTimingHookEnabled: Boolean = false
+    @Volatile
+    var dbTimingHookEnabled: Boolean = false
 
     private val processStartMs = SystemClock.elapsedRealtime()
     private val traceStartNs = SystemClock.elapsedRealtimeNanos()
+    private val traceId = buildTraceId()
     private val startupProfiler = StartupProfiler(
         processStartMs = processStartMs,
         startupWindowMsProvider = { startupWindowMs },
@@ -487,6 +492,76 @@ object MethodTraceRuntime {
         return sb.toString()
     }
 
+    internal fun currentCorrelationContext(): TraceCorrelationContext {
+        val thread = Thread.currentThread()
+        return TraceCorrelationContext(
+            traceId = traceId,
+            activeSpanId = activeMethodByThreadId[thread.id],
+            threadId = thread.id,
+            threadName = thread.name,
+        )
+    }
+
+    internal fun recordNetworkTiming(event: NetworkTimingEvent) {
+        val tsUs = (event.requestStartNs - traceStartNs).coerceAtLeast(0L) / 1_000L
+        val durUs = event.durationNs / 1_000L
+        enqueueEventJson(
+            buildExternalTimingEventJson(
+                name = "network:${event.method}",
+                tsUs = tsUs,
+                durUs = durUs,
+                threadId = event.correlation.threadId,
+                argsJson = event.toArgsJson(),
+            ),
+        )
+    }
+
+    internal fun recordDbTiming(event: DbTimingEvent, nameSuffix: String) {
+        val tsUs = (event.queryStartNs - traceStartNs).coerceAtLeast(0L) / 1_000L
+        val durUs = event.durationNs / 1_000L
+        enqueueEventJson(
+            buildExternalTimingEventJson(
+                name = "db:${event.operation}$nameSuffix",
+                tsUs = tsUs,
+                durUs = durUs,
+                threadId = event.threadId,
+                argsJson = event.toArgsJson(),
+            ),
+        )
+    }
+
+    private fun buildExternalTimingEventJson(
+        name: String,
+        tsUs: Long,
+        durUs: Long,
+        threadId: Long,
+        argsJson: String,
+    ): String {
+        val state = getOrCreateThreadState()
+        val sb = state.jsonBuilder
+        sb.setLength(0)
+        sb.append('{')
+            .append("\"name\":\"")
+            .append(escapeJson(name))
+            .append("\",")
+            .append("\"ph\":\"X\",")
+            .append("\"cat\":\"integration\",")
+            .append("\"ts\":")
+            .append(tsUs)
+            .append(',')
+            .append("\"dur\":")
+            .append(durUs)
+            .append(',')
+            .append("\"pid\":0,")
+            .append("\"tid\":")
+            .append(threadId)
+            .append(',')
+            .append("\"args\":")
+            .append(argsJson)
+            .append('}')
+        return sb.toString()
+    }
+
     private fun ensureMainThreadStallDetector() {
         if (mainThreadStallDetector != null) return
         val mainHandler = Handler(Looper.getMainLooper())
@@ -564,6 +639,16 @@ object MethodTraceRuntime {
         } else {
             activeMethodByThreadId[threadId] = method
         }
+    }
+
+    private fun buildTraceId(): String {
+        val random = Random(System.nanoTime())
+        val hexChars = "0123456789abcdef"
+        val output = CharArray(16)
+        for (i in output.indices) {
+            output[i] = hexChars[random.nextInt(hexChars.length)]
+        }
+        return String(output)
     }
 
     private fun buildMainThreadStallEventJson(stall: MainThreadStallEvent, tsUs: Long): String {
