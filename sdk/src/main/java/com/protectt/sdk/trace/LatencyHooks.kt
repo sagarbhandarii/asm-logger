@@ -18,6 +18,8 @@ internal object HookRuntimeBridge {
 
 internal data class TraceCorrelationContext(
     val traceId: String,
+    val sessionId: String,
+    val transactionId: String?,
     val activeSpanId: String?,
     val threadId: Long,
     val threadName: String,
@@ -48,6 +50,10 @@ internal data class NetworkTimingEvent(
         append(',')
         append("\"failed\":").append(failed).append(',')
         append("\"traceId\":\"").append(correlation.traceId.escapeJson()).append("\",")
+        append("\"sessionId\":\"").append(correlation.sessionId.escapeJson()).append("\",")
+        append("\"transactionId\":")
+        if (correlation.transactionId == null) append("null") else append('"').append(correlation.transactionId.escapeJson()).append('"')
+        append(',')
         append("\"activeSpanId\":")
         if (correlation.activeSpanId == null) append("null") else append('"').append(correlation.activeSpanId.escapeJson()).append('"')
         append(',')
@@ -78,6 +84,10 @@ internal data class DbTimingEvent(
         append("\"threadId\":").append(threadId).append(',')
         append("\"threadName\":\"").append(threadName.escapeJson()).append("\",")
         append("\"traceId\":\"").append(correlation.traceId.escapeJson()).append("\",")
+        append("\"sessionId\":\"").append(correlation.sessionId.escapeJson()).append("\",")
+        append("\"transactionId\":")
+        if (correlation.transactionId == null) append("null") else append('"').append(correlation.transactionId.escapeJson()).append('"')
+        append(',')
         append("\"activeSpanId\":")
         if (correlation.activeSpanId == null) append("null") else append('"').append(correlation.activeSpanId.escapeJson()).append('"')
         append('}')

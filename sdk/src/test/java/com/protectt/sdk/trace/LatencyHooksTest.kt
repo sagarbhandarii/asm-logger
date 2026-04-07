@@ -19,7 +19,7 @@ class LatencyHooksTest {
     fun tearDown() {
         HookRuntimeBridge.networkEnabled = { false }
         HookRuntimeBridge.dbEnabled = { false }
-        HookRuntimeBridge.correlation = { TraceCorrelationContext("test", null, 0L, "test") }
+        HookRuntimeBridge.correlation = { TraceCorrelationContext("test", "session", null, null, 0L, "test") }
         HookRuntimeBridge.emitNetwork = {}
         HookRuntimeBridge.emitDb = { _, _ -> }
     }
@@ -37,6 +37,8 @@ class LatencyHooksTest {
             failed = false,
             correlation = TraceCorrelationContext(
                 traceId = "trace-1",
+                sessionId = "session-1",
+                transactionId = "tx-1",
                 activeSpanId = "Auth#doLogin",
                 threadId = 7L,
                 threadName = "main",
@@ -49,6 +51,8 @@ class LatencyHooksTest {
         assertTrue(json.contains("\"host\":\"api.example.com\""))
         assertTrue(json.contains("\"pathTemplate\":\"/users/:id/orders/:id\""))
         assertTrue(json.contains("\"activeSpanId\":\"Auth#doLogin\""))
+        assertTrue(json.contains("\"sessionId\":\"session-1\""))
+        assertTrue(json.contains("\"transactionId\":\"tx-1\""))
     }
 
     @Test
@@ -56,7 +60,7 @@ class LatencyHooksTest {
         val captured = AtomicReference<NetworkTimingEvent>()
         HookRuntimeBridge.networkEnabled = { true }
         HookRuntimeBridge.correlation = {
-            TraceCorrelationContext("trace-2", "span-2", 12L, "io")
+            TraceCorrelationContext("trace-2", "session-2", "tx-2", "span-2", 12L, "io")
         }
         HookRuntimeBridge.emitNetwork = { captured.set(it) }
 
@@ -79,7 +83,7 @@ class LatencyHooksTest {
     fun dbTimingHookCapturesOperationTableAndFingerprint() {
         val captured = AtomicReference<DbTimingEvent>()
         HookRuntimeBridge.dbEnabled = { true }
-        HookRuntimeBridge.correlation = { TraceCorrelationContext("trace-db", "span-db", 99L, "worker") }
+        HookRuntimeBridge.correlation = { TraceCorrelationContext("trace-db", "session-db", null, "span-db", 99L, "worker") }
         HookRuntimeBridge.emitDb = { event, _ -> captured.set(event) }
 
         DbTimingHooks.timeQuery("SELECT * FROM users WHERE email='alice@example.com' AND age=42") {
@@ -113,7 +117,7 @@ class LatencyHooksTest {
             statementFingerprint = "abc",
             threadId = 1L,
             threadName = "main",
-            correlation = TraceCorrelationContext("trace-x", "span-y", 1L, "main"),
+            correlation = TraceCorrelationContext("trace-x", "session-x", null, "span-y", 1L, "main"),
         )
 
         val json = event.toArgsJson()
