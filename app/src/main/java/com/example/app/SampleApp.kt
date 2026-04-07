@@ -12,6 +12,7 @@ class SampleApp : Application() {
         MethodTraceRuntime.enabled = true
         MethodTraceRuntime.startupTracingOnly = true
         MethodTraceRuntime.startupWindowMs = 20_000L
+        MethodTraceRuntime.useAppInternalFiles(this, fileName = "methodtrace-report.json")
         MethodTraceRuntime.installLifecycleFlush(this, intervalSeconds = 5L)
 
         ProtecttSdk.init(this)
