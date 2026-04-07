@@ -87,24 +87,24 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
                 ?.mapNotNull { it as? MutableMap<String, Any?> }
                 .orEmpty()
 
-        if (summaryMethods.isNotEmpty()) {
-            root["rankings"] = mutableMapOf<String, Any?>(
-                "byP95" to summaryMethods.sortedByDescending { (it["p95Ns"] as? Number)?.toLong() ?: 0L },
-                "byTotalNs" to summaryMethods.sortedByDescending { (it["totalNs"] as? Number)?.toLong() ?: 0L },
-                "byMaxNs" to summaryMethods.sortedByDescending { (it["maxNs"] as? Number)?.toLong() ?: 0L },
-                "byMainThreadTotalNs" to summaryMethods.sortedByDescending {
-                    (it["mainThreadTotalNs"] as? Number)?.toLong() ?: 0L
-                },
-            )
-        }
-
         val ts = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").format(LocalDateTime.now())
         val outDir = outputDir.get().asFile
         outDir.mkdirs()
         val outFile = outDir.resolve("methodtrace-$ts.json")
+        val mdFile = outDir.resolve("methodtrace-$ts.md")
+
+        if (summaryMethods.isNotEmpty()) {
+            val enhancement = buildHotspotEnhancement(root = root, summaryMethods = summaryMethods)
+            root["rankings"] = enhancement.rankings
+            mdFile.writeText(enhancement.markdownSummary)
+        }
+
         outFile.writeText(JsonOutput.prettyPrint(JsonOutput.toJson(root)))
 
         logger.lifecycle("[methodTrace] Saved sorted report: ${outFile.absolutePath}")
+        if (mdFile.exists()) {
+            logger.lifecycle("[methodTrace] Saved hotspot markdown summary: ${mdFile.absolutePath}")
+        }
     }
 
     private fun parseReportRoot(rawOutput: String): MutableMap<String, Any?> {

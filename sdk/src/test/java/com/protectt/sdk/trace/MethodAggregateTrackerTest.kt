@@ -10,14 +10,15 @@ class MethodAggregateTrackerTest {
     fun recordsAggregateCountAndTotals() {
         val tracker = MethodAggregateTracker(percentileSampleSize = 64, rng = Random(1L))
 
-        tracker.record("A#m()V", durationNs = 10, selfNs = 7, isMainThread = false)
-        tracker.record("A#m()V", durationNs = 20, selfNs = 18, isMainThread = true)
+        tracker.record("A#m()V", durationNs = 10, selfNs = 7, isMainThread = false, isStartupWindow = true)
+        tracker.record("A#m()V", durationNs = 20, selfNs = 18, isMainThread = true, isStartupWindow = false)
 
         val method = tracker.snapshot(nowMs = 123L).methods.single { it.methodId == "A#m()V" }
         assertEquals(2L, method.callCount)
         assertEquals(30L, method.totalNs)
         assertEquals(25L, method.selfTotalNs)
         assertEquals(20L, method.mainThreadTotalNs)
+        assertEquals(10L, method.startupTotalNs)
     }
 
     @Test
@@ -64,5 +65,6 @@ class MethodAggregateTrackerTest {
         assertTrue(json.contains("\"callCount\":1"))
         assertTrue(json.contains("\"p95Ns\""))
         assertTrue(json.contains("\"mainThreadTotalNs\":42"))
+        assertTrue(json.contains("\"startupTotalNs\":0"))
     }
 }
