@@ -140,18 +140,19 @@ internal class FrameJankTracker(
         }
     }
 
-    private fun escapeJson(value: String): String {
-        val escaped = StringBuilder(value.length + 8)
-        value.forEach { ch ->
-            when (ch) {
-                '\\' -> escaped.append("\\\\")
-                '"' -> escaped.append("\\\"")
-                '\n' -> escaped.append("\\n")
-                '\r' -> escaped.append("\\r")
-                '\t' -> escaped.append("\\t")
-                else -> escaped.append(ch)
-            }
+}
+
+private fun escapeJson(value: String): String {
+    val escaped = StringBuilder(value.length + 8)
+    value.forEach { ch ->
+        when (ch) {
+            '\\' -> escaped.append("\\\\")
+            '"' -> escaped.append("\\\"")
+            '\n' -> escaped.append("\\n")
+            '\r' -> escaped.append("\\r")
+            '\t' -> escaped.append("\\t")
+            else -> escaped.append(ch)
         }
-        return escaped.toString()
     }
+    return escaped.toString()
 }

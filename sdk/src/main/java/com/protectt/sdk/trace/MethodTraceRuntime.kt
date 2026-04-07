@@ -547,7 +547,7 @@ object MethodTraceRuntime {
 
     private fun popAndComputeSelfNs(methodId: String, startNs: Long, durationNs: Long): Long {
         val stack = getOrCreateThreadState().callStack
-        val frame = stack.removeLastOrNull()
+        val frame = if (stack.isEmpty()) null else stack.removeLast()
         if (frame == null) return durationNs
 
         val selfNs = if (frame.methodId == methodId && frame.startNs == startNs) {
@@ -1069,7 +1069,7 @@ internal class MethodAggregateTracker(
                 methods.forEachIndexed { index, summary ->
                     if (index > 0) append(',')
                     append('{')
-                    append("\"methodId\":\"").append(escapeJson(summary.methodId)).append("\",")
+                    append("\"methodId\":\"").append(escapeJsonCompat(summary.methodId)).append("\",")
                     append("\"callCount\":").append(summary.callCount).append(',')
                     append("\"totalNs\":").append(summary.totalNs).append(',')
                     append("\"maxNs\":").append(summary.maxNs).append(',')
@@ -1217,4 +1217,19 @@ object SamplingConfig {
     @JvmField
     @Volatile
     var slowCallThresholdMs: Long = 0L
+}
+
+private fun escapeJsonCompat(value: String): String {
+    val escaped = StringBuilder(value.length + 8)
+    value.forEach { ch ->
+        when (ch) {
+            '\\' -> escaped.append("\\\\")
+            '"' -> escaped.append("\\\"")
+            '\n' -> escaped.append("\\n")
+            '\r' -> escaped.append("\\r")
+            '\t' -> escaped.append("\\t")
+            else -> escaped.append(ch)
+        }
+    }
+    return escaped.toString()
 }

@@ -181,7 +181,7 @@ internal class ExceptionCorrelationTracker(
                 .sortedBy { it.key }
                 .map { (threadId, methodId) -> "$threadId:$methodId" }
                 .take(16),
-            recentTraceSlice = synchronized(lock) { recentEvents.takeLast(recentTraceLimit) },
+            recentTraceSlice = synchronized(lock) { recentEvents.toList().takeLast(recentTraceLimit) },
             runtimeState = runtimeState,
         )
 
