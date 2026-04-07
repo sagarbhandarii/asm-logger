@@ -105,6 +105,13 @@ internal data class IssueAnalysisResult(
 private data class DetectionContext(
     val root: Map<String, Any?>,
     val methods: List<Map<String, Any?>>,
+    val regressionWeightsByMethod: Map<String, Double>,
+    val frequencyTrendByMethod: Map<String, Double>,
+)
+
+internal data class IssueAnalysisSignals(
+    val regressionWeightsByMethod: Map<String, Double> = emptyMap(),
+    val frequencyTrendByMethod: Map<String, Double> = emptyMap(),
 )
 
 private interface IssueDetector {
@@ -124,8 +131,17 @@ internal class IssueAnalyzer(
         DbQueryBottleneckDetector(),
     )
 
-    fun analyze(root: Map<String, Any?>, summaryMethods: List<Map<String, Any?>>): IssueAnalysisResult {
-        val context = DetectionContext(root = root, methods = summaryMethods)
+    fun analyze(
+        root: Map<String, Any?>,
+        summaryMethods: List<Map<String, Any?>>,
+        signals: IssueAnalysisSignals = IssueAnalysisSignals(),
+    ): IssueAnalysisResult {
+        val context = DetectionContext(
+            root = root,
+            methods = summaryMethods,
+            regressionWeightsByMethod = signals.regressionWeightsByMethod,
+            frequencyTrendByMethod = signals.frequencyTrendByMethod,
+        )
         val raw = detectors.flatMap { it.detect(context) }
         val merged = mergeCorrelatedIssues(raw)
         val deduped = merged
@@ -145,7 +161,7 @@ private class SlowMethodDetector : IssueDetector {
             if (p95Ns < 50_000_000L && maxNs < 100_000_000L) return@mapNotNull null
 
             val affected = parseAffected(method["methodId"]?.toString())
-            val score = (p95Ns / 1_000_000.0 * 1.2) + (maxNs / 1_000_000.0 * 0.8) + frequencyScore(method)
+            val score = (p95Ns / 1_000_000.0 * 1.2) + (maxNs / 1_000_000.0 * 0.8) + frequencyScore(context, method) + regressionBoost(context, methodId = method["methodId"]?.toString())
             val severity = when {
                 maxNs >= 1_000_000_000L || p95Ns >= 500_000_000L -> IssueSeverity.CRITICAL
                 maxNs >= 300_000_000L || p95Ns >= 200_000_000L -> IssueSeverity.HIGH
@@ -159,7 +175,7 @@ private class SlowMethodDetector : IssueDetector {
                 severity = severity,
                 summary = "Method shows elevated tail latency (p95/max).",
                 probableRootCause = "Method logic is latency-heavy in the tail path.",
-                recommendedFix = "Move blocking work off critical path, cache expensive calls, and reduce allocations.",
+                recommendedFix = "1) Move blocking work off the critical path.\n2) Cache or memoize expensive results.\n3) Reduce allocations in the tail path.",
                 relatedSignals = emptyList(),
                 affected = affected,
                 score = score,
@@ -184,7 +200,11 @@ private class HighCumulativeCostDetector : IssueDetector {
             if (totalNs < 200_000_000L || calls < 5L) return@mapNotNull null
 
             val affected = parseAffected(method["methodId"]?.toString())
-            val score = (totalNs / 1_000_000.0) + frequencyScore(method) + (metric(method, "mainThreadTotalNs") / 1_000_000.0 * 0.2)
+            val score =
+                (totalNs / 1_000_000.0) +
+                    frequencyScore(context, method) +
+                    (metric(method, "mainThreadTotalNs") / 1_000_000.0 * 0.2) +
+                    regressionBoost(context, methodId = method["methodId"]?.toString())
             val severity = when {
                 totalNs >= 5_000_000_000L -> IssueSeverity.CRITICAL
                 totalNs >= 2_000_000_000L -> IssueSeverity.HIGH
@@ -198,7 +218,7 @@ private class HighCumulativeCostDetector : IssueDetector {
                 severity = severity,
                 summary = "Method contributes high total runtime cost across calls.",
                 probableRootCause = "Frequently invoked path with expensive operations.",
-                recommendedFix = "Reduce invocation frequency, memoize results, and split heavy logic.",
+                recommendedFix = "1) Reduce invocation frequency on hot paths.\n2) Memoize stable computations.\n3) Split heavy logic into incremental/background work.",
                 relatedSignals = emptyList(),
                 affected = affected,
                 score = score,
@@ -225,7 +245,11 @@ private class MainThreadBlockingDetector : IssueDetector {
             if (mainThreadNs < 120_000_000L && stallHits == 0L) return@mapNotNull null
 
             val affected = parseAffected(method["methodId"]?.toString())
-            val score = (mainThreadNs / 1_000_000.0 * 1.4) + (stallHits * 40.0) + frequencyScore(method)
+            val score =
+                (mainThreadNs / 1_000_000.0 * 1.4) +
+                    (stallHits * 40.0) +
+                    frequencyScore(context, method) +
+                    regressionBoost(context, methodId = methodId)
             val severity = when {
                 stallHits >= 3L || mainThreadNs >= 2_000_000_000L -> IssueSeverity.CRITICAL
                 stallHits >= 2L || mainThreadNs >= 1_000_000_000L -> IssueSeverity.HIGH
@@ -239,7 +263,7 @@ private class MainThreadBlockingDetector : IssueDetector {
                 severity = severity,
                 summary = "Method is associated with main-thread cost and/or stall events.",
                 probableRootCause = "Long-running work is executing on the main thread.",
-                recommendedFix = "Shift work to background threads and keep UI handlers short.",
+                recommendedFix = "1) Move CPU/I/O work to background dispatchers.\n2) Keep main-thread handlers under frame budget.\n3) Break long tasks into smaller chunks.",
                 relatedSignals = listOf(mapOf("kind" to "main_thread_stall", "hits" to stallHits)),
                 affected = affected,
                 score = score,
@@ -265,7 +289,11 @@ private class StartupBottleneckDetector : IssueDetector {
             val startupDurationNs = startupDurationMs * 1_000_000L
             val contribution = if (startupDurationNs > 0L) startupNs.toDouble() / startupDurationNs.toDouble() else 0.0
             val affected = parseAffected(method["methodId"]?.toString())
-            val score = (startupNs / 1_000_000.0 * 1.3) + (contribution * 300.0) + frequencyScore(method)
+            val score =
+                (startupNs / 1_000_000.0 * 1.3) +
+                    (contribution * 300.0) +
+                    frequencyScore(context, method) +
+                    regressionBoost(context, methodId = method["methodId"]?.toString())
             val severity = when {
                 contribution >= 0.40 || startupNs >= 1_500_000_000L -> IssueSeverity.CRITICAL
                 contribution >= 0.25 || startupNs >= 800_000_000L -> IssueSeverity.HIGH
@@ -279,7 +307,7 @@ private class StartupBottleneckDetector : IssueDetector {
                 severity = severity,
                 summary = "Method contributes significantly during startup window.",
                 probableRootCause = "Startup path is doing heavy synchronous work.",
-                recommendedFix = "Defer non-critical initialization and parallelize startup tasks.",
+                recommendedFix = "1) Defer non-critical initialization.\n2) Parallelize independent startup tasks.\n3) Gate expensive setup behind first-use.",
                 relatedSignals = emptyList(),
                 affected = affected,
                 score = score,
@@ -310,7 +338,12 @@ private class ExceptionCorrelatedSlowPathDetector : IssueDetector {
             if (p95Ns < 40_000_000L && maxNs < 80_000_000L) return@mapNotNull null
 
             val affected = parseAffected(methodId)
-            val score = (p95Ns / 1_000_000.0 * 1.1) + (maxNs / 1_000_000.0 * 0.7) + (exceptionHits * 55.0) + frequencyScore(method)
+            val score =
+                (p95Ns / 1_000_000.0 * 1.1) +
+                    (maxNs / 1_000_000.0 * 0.7) +
+                    (exceptionHits * 55.0) +
+                    frequencyScore(context, method) +
+                    regressionBoost(context, methodId = methodId)
             val severity = when {
                 exceptionHits >= 3L && (p95Ns >= 250_000_000L || maxNs >= 500_000_000L) -> IssueSeverity.CRITICAL
                 exceptionHits >= 2L || p95Ns >= 140_000_000L || maxNs >= 300_000_000L -> IssueSeverity.HIGH
@@ -324,7 +357,7 @@ private class ExceptionCorrelatedSlowPathDetector : IssueDetector {
                 severity = severity,
                 summary = "Slow method appears in exception correlation spans.",
                 probableRootCause = "Method is both latency-heavy and failure-prone in the same execution paths.",
-                recommendedFix = "Harden error handling and optimize the method's I/O and compute hotspots.",
+                recommendedFix = "1) Harden error handling and retries.\n2) Optimize I/O and compute sections.\n3) Add fallback paths to prevent repeated failures.",
                 relatedSignals = listOf(
                     mapOf("kind" to "exception", "count" to exceptionHits),
                     mapOf("kind" to "method_latency", "p95Ns" to p95Ns, "maxNs" to maxNs),
@@ -360,7 +393,8 @@ private class NetworkLatencyHotspotDetector : IssueDetector {
                 (bucket.maxDurationNs / 1_000_000.0 * 0.9) +
                     (avgNs / 1_000_000.0 * 0.8) +
                     (bucket.calls * 6.0) +
-                    (bucket.failedCalls * 20.0)
+                    (bucket.failedCalls * 20.0) +
+                    regressionBoost(context, methodId = methodId)
             val severity = when {
                 bucket.maxDurationNs >= 900_000_000L || bucket.failedCalls >= 4L -> IssueSeverity.CRITICAL
                 bucket.maxDurationNs >= 400_000_000L || bucket.failedCalls >= 2L -> IssueSeverity.HIGH
@@ -379,7 +413,7 @@ private class NetworkLatencyHotspotDetector : IssueDetector {
                 severity = severity,
                 summary = "Method frequently overlaps with slow network calls.",
                 probableRootCause = "API latency and/or retries are inflating end-to-end method latency.",
-                recommendedFix = "Reduce payloads, add caching/batching, and optimize slow endpoint behavior.",
+                recommendedFix = "1) Reduce payload size and chatty calls.\n2) Add caching/batching where possible.\n3) Prioritize optimization of the top slow endpoints.",
                 relatedSignals = listOf(
                     mapOf("kind" to "network", "calls" to bucket.calls, "failedCalls" to bucket.failedCalls),
                     mapOf("kind" to "network_endpoints", "top" to topEndpoints),
@@ -417,7 +451,8 @@ private class DbQueryBottleneckDetector : IssueDetector {
                 (bucket.maxDurationNs / 1_000_000.0 * 1.0) +
                     (avgNs / 1_000_000.0 * 0.8) +
                     (bucket.calls * 7.0) +
-                    (bucket.expensiveHits * 18.0)
+                    (bucket.expensiveHits * 18.0) +
+                    regressionBoost(context, methodId = methodId)
             val severity = when {
                 bucket.maxDurationNs >= 700_000_000L || bucket.expensiveHits >= 5L -> IssueSeverity.CRITICAL
                 bucket.maxDurationNs >= 300_000_000L || bucket.expensiveHits >= 3L -> IssueSeverity.HIGH
@@ -436,7 +471,7 @@ private class DbQueryBottleneckDetector : IssueDetector {
                 severity = severity,
                 summary = "Method is associated with slow or high-frequency DB work.",
                 probableRootCause = "Database query execution dominates method runtime.",
-                recommendedFix = "Index key columns, reduce query frequency, and optimize query plans.",
+                recommendedFix = "1) Add/verify indexes on filter and join keys.\n2) Reduce query frequency and duplicate work.\n3) Optimize query plans for top expensive operations.",
                 relatedSignals = listOf(
                     mapOf("kind" to "db", "calls" to bucket.calls, "expensiveHits" to bucket.expensiveHits),
                     mapOf("kind" to "db_operations", "top" to topOps),
@@ -683,9 +718,16 @@ private fun metric(container: Any?, key: String): Long {
     return (map[key] as? Number)?.toLong() ?: 0L
 }
 
-private fun frequencyScore(method: Map<String, Any?>): Double {
+private fun frequencyScore(context: DetectionContext, method: Map<String, Any?>): Double {
     val callCount = metric(method, "callCount").coerceAtLeast(1L).toDouble()
-    return log10(callCount + 1.0) * 15.0
+    val base = log10(callCount + 1.0) * 15.0
+    val methodId = method["methodId"]?.toString()
+    val trend = context.frequencyTrendByMethod[methodId] ?: 0.0
+    return base + trend
+}
+
+private fun regressionBoost(context: DetectionContext, methodId: String?): Double {
+    return context.regressionWeightsByMethod[methodId] ?: 0.0
 }
 
 private fun confidenceFromSignals(signals: List<Boolean>): Double {

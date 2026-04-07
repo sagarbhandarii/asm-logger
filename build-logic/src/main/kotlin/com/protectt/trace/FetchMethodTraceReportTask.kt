@@ -94,16 +94,45 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
         val mdFile = outDir.resolve("methodtrace-$ts.md")
         val issuesJsonFile = outDir.resolve("top10-issues.json")
         val issuesMdFile = outDir.resolve("top10-issues.md")
+        val issuesHtmlFile = outDir.resolve("top10-issues.html")
 
         if (summaryMethods.isNotEmpty()) {
+            val historicalRoots = loadHistoricalMethodTraceRoots(outDir, maxFiles = 20)
+            val previousRoot = historicalRoots.firstOrNull()
+            val regression = buildRegressionAnalysis(
+                currentRoot = root,
+                currentMethods = summaryMethods,
+                previousRoot = previousRoot,
+            )
+            val trend = buildTrendAnalysis(
+                historyRoots = historicalRoots.reversed() + listOf(root),
+                currentMethods = summaryMethods,
+            )
+
             val enhancement = buildHotspotEnhancement(root = root, summaryMethods = summaryMethods)
             root["rankings"] = enhancement.rankings
+            root["regressions"] = regression.payload
+            root["trends"] = trend.payload
             mdFile.writeText(enhancement.markdownSummary)
 
-            val issues = IssueAnalyzer(topN = 10).analyze(root = root, summaryMethods = summaryMethods)
+            val issues = IssueAnalyzer(topN = 10).analyze(
+                root = root,
+                summaryMethods = summaryMethods,
+                signals = IssueAnalysisSignals(
+                    regressionWeightsByMethod = regression.regressionWeightsByMethod,
+                    frequencyTrendByMethod = trend.frequencyTrendByMethod,
+                ),
+            )
             root["topIssues"] = issues.issues.map { it.toMap() }
             issuesJsonFile.writeText(issues.toJson())
             issuesMdFile.writeText(issues.toMarkdown())
+            issuesHtmlFile.writeText(
+                buildIssueHtmlReport(
+                    issues = issues.issues,
+                    regression = regression.payload,
+                    trends = trend.payload,
+                ),
+            )
         }
 
         outFile.writeText(JsonOutput.prettyPrint(JsonOutput.toJson(root)))
@@ -117,6 +146,9 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
         }
         if (issuesMdFile.exists()) {
             logger.lifecycle("[methodTrace] Saved Top 10 issues markdown: ${issuesMdFile.absolutePath}")
+        }
+        if (issuesHtmlFile.exists()) {
+            logger.lifecycle("[methodTrace] Saved Top 10 issues HTML: ${issuesHtmlFile.absolutePath}")
         }
     }
 

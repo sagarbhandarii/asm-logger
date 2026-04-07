@@ -209,4 +209,41 @@ class IssueAnalyzerTest {
         assertTrue(markdown.contains("# Top 10 Issue Report"))
         assertTrue(markdown.contains("Probable root cause"))
     }
+
+    @Test
+    fun `ranking incorporates regression and frequency trend signals`() {
+        val methods = listOf(
+            mutableMapOf<String, Any?>(
+                "methodId" to "com/example/Foo#a()V",
+                "callCount" to 12L,
+                "totalNs" to 450_000_000L,
+                "maxNs" to 150_000_000L,
+                "p95Ns" to 110_000_000L,
+                "mainThreadTotalNs" to 120_000_000L,
+                "startupTotalNs" to 100_000_000L,
+            ),
+            mutableMapOf<String, Any?>(
+                "methodId" to "com/example/Foo#b()V",
+                "callCount" to 12L,
+                "totalNs" to 450_000_000L,
+                "maxNs" to 150_000_000L,
+                "p95Ns" to 110_000_000L,
+                "mainThreadTotalNs" to 120_000_000L,
+                "startupTotalNs" to 100_000_000L,
+            ),
+        )
+        val root = mapOf<String, Any?>("startup" to mapOf("startupDurationMs" to 1_000L))
+
+        val result = IssueAnalyzer(topN = 10).analyze(
+            root = root,
+            summaryMethods = methods,
+            signals = IssueAnalysisSignals(
+                regressionWeightsByMethod = mapOf("com/example/Foo#b()V" to 55.0),
+                frequencyTrendByMethod = mapOf("com/example/Foo#b()V" to 10.0),
+            ),
+        )
+
+        val topAffected = result.issues.firstOrNull()?.affected?.method.orEmpty()
+        assertTrue(topAffected.contains("b()V"))
+    }
 }
