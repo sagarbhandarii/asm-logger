@@ -5,6 +5,7 @@ import com.android.build.api.instrumentation.InstrumentationScope
 import com.android.build.api.variant.AndroidComponentsExtension
 import org.gradle.api.Plugin
 import org.gradle.api.Project
+import java.nio.charset.StandardCharsets
 
 class MethodTracePlugin : Plugin<Project> {
     override fun apply(project: Project) {
@@ -117,10 +118,12 @@ class MethodTracePlugin : Plugin<Project> {
 
         val namespaceDot = namespacePath.replace('/', '.')
         val outputDirProvider = project.layout.buildDirectory.dir("generated/source/methodtrace/runtime")
+        val templateSources = loadRuntimeTemplates()
         val generateTask = project.tasks.register("generateMethodTraceRuntime", GenerateMethodTraceRuntimeTask::class.java)
         generateTask.configure {
             namespace.set(namespaceDot)
             outputDir.set(outputDirProvider)
+            runtimeTemplates.set(templateSources)
         }
 
         val sourceSets = androidExt::class.java.methods
@@ -148,6 +151,25 @@ class MethodTracePlugin : Plugin<Project> {
                 dependsOn(generateTask)
             }
             break
+        }
+    }
+
+    private fun loadRuntimeTemplates(): Map<String, String> {
+        val indexResource = "MethodTraceRuntime.templates"
+        val indexLines = javaClass.classLoader.getResourceAsStream(indexResource)
+            ?.bufferedReader(StandardCharsets.UTF_8)
+            ?.use { reader ->
+                reader.readLines()
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() && !it.startsWith("#") }
+            }
+            ?: error("Runtime template index resource '$indexResource' is missing")
+
+        return indexLines.associateWith { templateName ->
+            javaClass.classLoader.getResourceAsStream(templateName)
+                ?.bufferedReader(StandardCharsets.UTF_8)
+                ?.use { it.readText() }
+                ?: error("Runtime template resource '$templateName' is missing")
         }
     }
 
