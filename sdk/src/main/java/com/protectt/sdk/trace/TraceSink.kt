@@ -3,11 +3,11 @@ package com.protectt.sdk.trace
 import java.io.File
 import java.io.RandomAccessFile
 
-internal interface TraceSink {
+interface TraceSink {
     fun appendEvents(events: List<String>)
 }
 
-internal class JsonTraceSink(
+class JsonTraceSink(
     private val outputFileProvider: () -> File,
 ) : TraceSink {
     private val lock = Any()

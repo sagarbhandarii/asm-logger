@@ -1,6 +1,6 @@
 package com.protectt.sdk.trace
 
-internal data class TraceSessionContext(
+data class TraceSessionContext(
     val traceId: String,
     val sessionId: String,
     val transactionId: String?,

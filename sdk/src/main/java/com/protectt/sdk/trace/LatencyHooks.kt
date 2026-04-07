@@ -148,7 +148,7 @@ internal class ProtecttOkHttpEventListener(
 }
 
 object DbTimingHooks {
-    inline fun <T> timeQuery(sql: String, block: () -> T): T {
+    fun <T> timeQuery(sql: String, block: () -> T): T {
         if (!HookRuntimeBridge.dbEnabled()) return block()
 
         val startNs = System.nanoTime()
