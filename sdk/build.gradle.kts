@@ -38,4 +38,6 @@ methodTrace {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
+
+    testImplementation("junit:junit:4.13.2")
 }

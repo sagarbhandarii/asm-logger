@@ -9,10 +9,12 @@ import android.util.Log
 import java.io.File
 import java.io.RandomAccessFile
 import java.util.ArrayDeque
+import java.util.Random
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.ceil
 
 object MethodTraceRuntime {
     @Volatile
@@ -40,6 +42,7 @@ object MethodTraceRuntime {
     private const val DEFAULT_FLUSH_BATCH_SIZE = 1_024
 
     private const val DEFAULT_OUTPUT_PATH = "/sdcard/method_trace.json"
+    private const val SUMMARY_FILE_NAME = "methodtrace-summary.json"
 
     private const val TRACE_HEADER = "{\"traceEvents\":[\n"
     private const val TRACE_FOOTER = "\n]}"
@@ -49,13 +52,24 @@ object MethodTraceRuntime {
     private val TRACE_FOOTER_BYTES = TRACE_FOOTER.toByteArray(Charsets.UTF_8)
     private val COMMA_NEWLINE_BYTES = COMMA_NEWLINE.toByteArray(Charsets.UTF_8)
 
+    private data class CallFrame(
+        val methodId: String,
+        val startNs: Long,
+        var childDurationNs: Long = 0L,
+    )
+
     private data class ThreadTraceState(
         val jsonBuilder: StringBuilder = StringBuilder(256),
+        val callStack: ArrayDeque<CallFrame> = ArrayDeque(32),
     )
 
     private val threadState = ThreadLocal<ThreadTraceState>()
     private val bufferLock = Any()
     private val pendingEvents = ArrayDeque<String>(INITIAL_BUFFER_CAPACITY)
+
+    private val aggregateTracker = MethodAggregateTracker()
+    private val summaryDirty = AtomicBoolean(false)
+    private val summaryFlushQueued = AtomicBoolean(false)
 
     private val asyncWriter = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "method-trace-writer").apply { isDaemon = true }
@@ -87,7 +101,10 @@ object MethodTraceRuntime {
     @JvmStatic
     fun enter(methodId: String): Long {
         if (!shouldTrace()) return 0L
-        return SystemClock.elapsedRealtimeNanos()
+        val startNs = SystemClock.elapsedRealtimeNanos()
+        val state = getOrCreateThreadState()
+        state.callStack.addLast(CallFrame(methodId = methodId, startNs = startNs))
+        return startNs
     }
 
     @JvmStatic
@@ -97,6 +114,15 @@ object MethodTraceRuntime {
         val endNs = SystemClock.elapsedRealtimeNanos()
         val durationNs = (endNs - startNanos).coerceAtLeast(0L)
         maybeLogMainThreadSlowCall(methodId, durationNs)
+
+        val selfNs = popAndComputeSelfNs(methodId = methodId, startNs = startNanos, durationNs = durationNs)
+        aggregateTracker.record(
+            methodId = methodId,
+            durationNs = durationNs,
+            selfNs = selfNs,
+            isMainThread = isMainThread(),
+        )
+        summaryDirty.set(true)
 
         val tsUs = (startNanos - traceStartNs).coerceAtLeast(0L) / 1_000L
         val durUs = durationNs / 1_000L
@@ -167,12 +193,35 @@ object MethodTraceRuntime {
     @JvmStatic
     fun flushNow(reason: String = "manual", limit: Int = DEFAULT_FLUSH_BATCH_SIZE) {
         val batch = drainEvents(limit.coerceAtLeast(1))
-        if (batch.isEmpty()) return
+        if (batch.isNotEmpty()) {
+            runCatching {
+                appendEventsToTraceFile(batch)
+            }.onFailure {
+                Log.w(TAG, "Failed to flush trace events ($reason): ${it.message}")
+            }
+        }
+        queueAsyncSummaryFlush(reason)
+    }
 
-        runCatching {
-            appendEventsToTraceFile(batch)
-        }.onFailure {
-            Log.w(TAG, "Failed to flush trace events ($reason): ${it.message}")
+    private fun queueAsyncSummaryFlush(reason: String) {
+        if (!summaryDirty.get()) return
+        if (!summaryFlushQueued.compareAndSet(false, true)) return
+
+        asyncWriter.execute {
+            try {
+                val shouldWrite = summaryDirty.getAndSet(false)
+                if (!shouldWrite) return@execute
+                val summarySnapshot = aggregateTracker.snapshot()
+                appendSummaryToFile(summarySnapshot)
+            } catch (error: Throwable) {
+                summaryDirty.set(true)
+                Log.w(TAG, "Failed to flush method summary ($reason): ${error.message}")
+            } finally {
+                summaryFlushQueued.set(false)
+                if (summaryDirty.get()) {
+                    queueAsyncSummaryFlush("retry")
+                }
+            }
         }
     }
 
@@ -232,6 +281,29 @@ object MethodTraceRuntime {
         }
     }
 
+    private fun appendSummaryToFile(snapshot: MethodAggregateTracker.SummarySnapshot) {
+        val summaryFile = resolveSummaryFile()
+        summaryFile.parentFile?.mkdirs()
+        summaryFile.writeText(snapshot.toJson())
+    }
+
+    private fun popAndComputeSelfNs(methodId: String, startNs: Long, durationNs: Long): Long {
+        val stack = getOrCreateThreadState().callStack
+        val frame = stack.removeLastOrNull()
+        if (frame == null) return durationNs
+
+        val selfNs = if (frame.methodId == methodId && frame.startNs == startNs) {
+            approximateSelfNs(durationNs, frame.childDurationNs)
+        } else {
+            durationNs
+        }
+
+        stack.lastOrNull()?.let { parent ->
+            parent.childDurationNs = (parent.childDurationNs + durationNs).coerceAtLeast(0L)
+        }
+        return selfNs
+    }
+
     private fun buildEventJson(methodId: String, tsUs: Long, durUs: Long, threadId: Long): String {
         val state = getOrCreateThreadState()
         val sb = state.jsonBuilder
@@ -258,6 +330,11 @@ object MethodTraceRuntime {
 
     private fun resolveOutputFile(): File {
         return File(outputFilePathOverride ?: DEFAULT_OUTPUT_PATH)
+    }
+
+    private fun resolveSummaryFile(): File {
+        val traceFile = resolveOutputFile()
+        return File(traceFile.parentFile ?: File("/sdcard"), SUMMARY_FILE_NAME)
     }
 
     private fun escapeJson(value: String): String {
@@ -312,7 +389,170 @@ object MethodTraceRuntime {
         if (!startupTracingOnly) return true
         return SystemClock.elapsedRealtime() - processStartMs <= startupWindowMs
     }
+}
 
+
+internal fun approximateSelfNs(durationNs: Long, childDurationNs: Long): Long {
+    return (durationNs - childDurationNs).coerceAtLeast(0L)
+}
+
+internal class MethodAggregateTracker(
+    private val percentileSampleSize: Int = 128,
+    private val rng: Random = Random(0L),
+) {
+    data class MethodSummary(
+        val methodId: String,
+        val callCount: Long,
+        val totalNs: Long,
+        val maxNs: Long,
+        val minNs: Long,
+        val p50Ns: Long,
+        val p95Ns: Long,
+        val p99Ns: Long,
+        val selfTotalNs: Long,
+        val mainThreadTotalNs: Long,
+    )
+
+    data class SummarySnapshot(
+        val generatedAtEpochMs: Long,
+        val methods: List<MethodSummary>,
+    ) {
+        fun toJson(): String {
+            return buildString(methods.size * 192 + 128) {
+                append('{')
+                append("\"generatedAtEpochMs\":")
+                append(generatedAtEpochMs)
+                append(',')
+                append("\"methods\":[")
+                methods.forEachIndexed { index, summary ->
+                    if (index > 0) append(',')
+                    append('{')
+                    append("\"methodId\":\"").append(escapeJson(summary.methodId)).append("\",")
+                    append("\"callCount\":").append(summary.callCount).append(',')
+                    append("\"totalNs\":").append(summary.totalNs).append(',')
+                    append("\"maxNs\":").append(summary.maxNs).append(',')
+                    append("\"minNs\":").append(summary.minNs).append(',')
+                    append("\"p50Ns\":").append(summary.p50Ns).append(',')
+                    append("\"p95Ns\":").append(summary.p95Ns).append(',')
+                    append("\"p99Ns\":").append(summary.p99Ns).append(',')
+                    append("\"selfTotalNs\":").append(summary.selfTotalNs).append(',')
+                    append("\"mainThreadTotalNs\":").append(summary.mainThreadTotalNs)
+                    append('}')
+                }
+                append("]}")
+            }
+        }
+    }
+
+    private data class MutableStats(
+        var callCount: Long = 0L,
+        var totalNs: Long = 0L,
+        var maxNs: Long = Long.MIN_VALUE,
+        var minNs: Long = Long.MAX_VALUE,
+        var selfTotalNs: Long = 0L,
+        var mainThreadTotalNs: Long = 0L,
+        val sampler: ReservoirSampler,
+    )
+
+    private class ReservoirSampler(
+        private val capacity: Int,
+        private val rng: Random,
+    ) {
+        private val samples = LongArray(capacity.coerceAtLeast(1))
+        private var seen: Long = 0L
+        private var size: Int = 0
+
+        fun add(value: Long) {
+            val bounded = value.coerceAtLeast(0L)
+            seen += 1
+            if (size < samples.size) {
+                samples[size] = bounded
+                size += 1
+                return
+            }
+            val replaceIndex = nextIndex(seen)
+            if (replaceIndex < samples.size) {
+                samples[replaceIndex] = bounded
+            }
+        }
+
+        fun percentile(percentile: Double): Long {
+            if (size == 0) return 0L
+            val sorted = samples.copyOf(size)
+            sorted.sort()
+            val p = percentile.coerceIn(0.0, 1.0)
+            val rank = (ceil(p * size).toInt() - 1).coerceIn(0, size - 1)
+            return sorted[rank]
+        }
+
+        private fun nextIndex(boundExclusive: Long): Int {
+            if (boundExclusive <= 0L) return 0
+            var bits: Long
+            var value: Long
+            do {
+                bits = rng.nextLong() ushr 1
+                value = bits % boundExclusive
+            } while (bits - value + (boundExclusive - 1) < 0L)
+            return value.toInt()
+        }
+    }
+
+    private val lock = Any()
+    private val statsByMethod = LinkedHashMap<String, MutableStats>()
+
+    fun record(methodId: String, durationNs: Long, selfNs: Long, isMainThread: Boolean) {
+        synchronized(lock) {
+            val stats = statsByMethod.getOrPut(methodId) {
+                MutableStats(sampler = ReservoirSampler(percentileSampleSize, rng))
+            }
+            val boundedDuration = durationNs.coerceAtLeast(0L)
+            val boundedSelf = selfNs.coerceAtLeast(0L)
+            stats.callCount += 1
+            stats.totalNs += boundedDuration
+            stats.selfTotalNs += boundedSelf
+            if (isMainThread) {
+                stats.mainThreadTotalNs += boundedDuration
+            }
+            stats.maxNs = maxOf(stats.maxNs, boundedDuration)
+            stats.minNs = minOf(stats.minNs, boundedDuration)
+            stats.sampler.add(boundedDuration)
+        }
+    }
+
+    fun snapshot(nowMs: Long = System.currentTimeMillis()): SummarySnapshot {
+        synchronized(lock) {
+            val methods = statsByMethod.entries.map { (methodId, stats) ->
+                MethodSummary(
+                    methodId = methodId,
+                    callCount = stats.callCount,
+                    totalNs = stats.totalNs,
+                    maxNs = stats.maxNs.coerceAtLeast(0L),
+                    minNs = if (stats.minNs == Long.MAX_VALUE) 0L else stats.minNs,
+                    p50Ns = stats.sampler.percentile(0.50),
+                    p95Ns = stats.sampler.percentile(0.95),
+                    p99Ns = stats.sampler.percentile(0.99),
+                    selfTotalNs = stats.selfTotalNs,
+                    mainThreadTotalNs = stats.mainThreadTotalNs,
+                )
+            }
+            return SummarySnapshot(generatedAtEpochMs = nowMs, methods = methods)
+        }
+    }
+
+    private fun escapeJson(value: String): String {
+        val escaped = StringBuilder(value.length + 8)
+        value.forEach { ch ->
+            when (ch) {
+                '\\' -> escaped.append("\\\\")
+                '"' -> escaped.append("\\\"")
+                '\n' -> escaped.append("\\n")
+                '\r' -> escaped.append("\\r")
+                '\t' -> escaped.append("\\t")
+                else -> escaped.append(ch)
+            }
+        }
+        return escaped.toString()
+    }
 }
 
 object SamplingConfig {
