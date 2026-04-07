@@ -32,6 +32,12 @@ object MethodTraceRuntime {
     @Volatile
     var flushIntervalSeconds: Long = 5L
 
+    @Volatile
+    var uncaughtExceptionCaptureEnabled: Boolean = false
+
+    @Volatile
+    var redactExceptionMessages: Boolean = true
+
     private val processStartMs = SystemClock.elapsedRealtime()
     private val traceStartNs = SystemClock.elapsedRealtimeNanos()
     private val startupProfiler = StartupProfiler(
@@ -79,6 +85,11 @@ object MethodTraceRuntime {
     private val aggregateTracker = MethodAggregateTracker()
     private val summaryDirty = AtomicBoolean(false)
     private val summaryFlushQueued = AtomicBoolean(false)
+    private val exceptionTracker = ExceptionCorrelationTracker(
+        nowEpochMs = { System.currentTimeMillis() },
+    )
+
+    private val uncaughtHookInstalled = AtomicBoolean(false)
 
     private val asyncWriter = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "method-trace-writer").apply { isDaemon = true }
@@ -141,6 +152,7 @@ object MethodTraceRuntime {
         val durUs = durationNs / 1_000L
         val threadId = Thread.currentThread().id
         val eventJson = buildEventJson(methodId, tsUs, durUs, threadId)
+        exceptionTracker.recordTraceEvent(eventJson)
 
         val shouldScheduleFlush = synchronized(bufferLock) {
             pendingEvents.addLast(eventJson)
@@ -149,6 +161,39 @@ object MethodTraceRuntime {
 
         if (shouldScheduleFlush) {
             queueAsyncFlush()
+        }
+    }
+
+
+    @JvmStatic
+    fun installOptionalUncaughtExceptionCapture(enabled: Boolean = uncaughtExceptionCaptureEnabled) {
+        uncaughtExceptionCaptureEnabled = enabled
+        if (!enabled) return
+        if (!uncaughtHookInstalled.compareAndSet(false, true)) return
+
+        val existing = Thread.getDefaultUncaughtExceptionHandler()
+        val wrapped = exceptionTracker.buildUncaughtExceptionHandler(existing) { thread, throwable ->
+            captureExceptionCorrelation(
+                captureType = "uncaught",
+                throwable = throwable,
+                handledContext = null,
+                thread = thread,
+            )
+        }
+        Thread.setDefaultUncaughtExceptionHandler(wrapped)
+    }
+
+    @JvmStatic
+    fun reportHandledException(throwable: Throwable, context: String? = null) {
+        runCatching {
+            captureExceptionCorrelation(
+                captureType = "handled",
+                throwable = throwable,
+                handledContext = context,
+                thread = Thread.currentThread(),
+            )
+        }.onFailure {
+            Log.w(TAG, "Failed to correlate handled exception: ${it.message}")
         }
     }
 
@@ -279,7 +324,8 @@ object MethodTraceRuntime {
                 val shouldWrite = summaryDirty.getAndSet(false)
                 if (!shouldWrite) return@execute
                 val summarySnapshot = aggregateTracker.snapshot()
-                appendSummaryToFile(summarySnapshot)
+                val exceptionSnapshot = exceptionTracker.snapshot()
+                appendSummaryToFile(summarySnapshot, exceptionSnapshot)
             } catch (error: Throwable) {
                 summaryDirty.set(true)
                 Log.w(TAG, "Failed to flush method summary ($reason): ${error.message}")
@@ -348,20 +394,25 @@ object MethodTraceRuntime {
         }
     }
 
-    private fun appendSummaryToFile(snapshot: MethodAggregateTracker.SummarySnapshot) {
+    private fun appendSummaryToFile(
+        snapshot: MethodAggregateTracker.SummarySnapshot,
+        exceptions: List<CorrelatedException>,
+    ) {
         val summaryFile = resolveSummaryFile()
         summaryFile.parentFile?.mkdirs()
-        summaryFile.writeText(buildSummaryReportJson(snapshot, startupProfiler.summary()))
+        summaryFile.writeText(buildSummaryReportJson(snapshot, startupProfiler.summary(), exceptions))
     }
 
     private fun buildSummaryReportJson(
         methodSnapshot: MethodAggregateTracker.SummarySnapshot,
         startupSummary: StartupSummary,
+        exceptions: List<CorrelatedException>,
     ): String {
         return buildString(methodSnapshot.methods.size * 192 + startupSummary.markers.size * 64 + 256) {
             append('{')
             append("\"generatedAtEpochMs\":").append(methodSnapshot.generatedAtEpochMs).append(',')
             append("\"startup\":").append(startupSummary.toJson()).append(',')
+            append("\"exceptions\":").append(exceptionsToJson(exceptions)).append(',')
             append("\"methods\":[")
             methodSnapshot.methods.forEachIndexed { index, summary ->
                 if (index > 0) append(',')
@@ -502,6 +553,7 @@ object MethodTraceRuntime {
     }
 
     private fun enqueueEventJson(eventJson: String) {
+        exceptionTracker.recordTraceEvent(eventJson)
         val shouldScheduleFlush = synchronized(bufferLock) {
             pendingEvents.addLast(eventJson)
             pendingEvents.size >= MAX_BUFFERED_EVENTS
@@ -532,6 +584,48 @@ object MethodTraceRuntime {
             .append("\"elapsedMs\":").append(marker.elapsedMs)
             .append("}}")
         return sb.toString()
+    }
+
+
+    private fun captureExceptionCorrelation(
+        captureType: String,
+        throwable: Throwable,
+        handledContext: String?,
+        thread: Thread,
+    ) {
+        val startupPhase = startupProfiler.latestMarkerName()
+        val activeSpans = activeMethodByThreadId.toMap()
+        val runtimeState = RuntimeStateSnapshot(
+            tracingEnabled = enabled,
+            startupTracingOnly = startupTracingOnly,
+            startupActive = shouldTrace(),
+            pendingEventCount = synchronized(bufferLock) { pendingEvents.size },
+            activeSpanCount = activeSpans.size,
+            uptimeMs = SystemClock.elapsedRealtime() - processStartMs,
+        )
+
+        if (captureType == "uncaught") {
+            exceptionTracker.captureUncaughtException(
+                throwable = throwable,
+                redactSensitiveText = redactExceptionMessages,
+                startupPhase = startupPhase,
+                activeMethodByThreadId = activeSpans,
+                runtimeState = runtimeState,
+                thread = thread,
+            )
+        } else {
+            exceptionTracker.captureHandledException(
+                throwable = throwable,
+                handledContext = handledContext,
+                redactSensitiveText = redactExceptionMessages,
+                startupPhase = startupPhase,
+                activeMethodByThreadId = activeSpans,
+                runtimeState = runtimeState,
+                thread = thread,
+            )
+        }
+        summaryDirty.set(true)
+        queueAsyncSummaryFlush("exception_capture")
     }
 
     private fun resolveOutputFile(): File {
