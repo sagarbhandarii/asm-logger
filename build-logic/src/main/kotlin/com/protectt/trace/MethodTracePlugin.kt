@@ -95,12 +95,14 @@ class MethodTracePlugin : Plugin<Project> {
         runtimeClassName: String,
         extension: MethodTraceExtension,
     ): List<String> {
+        val runtimePackagePrefix = runtimeClassName.substringBeforeLast('/', missingDelimiterValue = runtimeClassName)
         return extension.excludeClassPrefixes
             .map { it.trim() }
             .filter { it.isNotEmpty() }
             .ifEmpty {
                 listOf(
                     runtimeClassName,
+                    "$runtimePackagePrefix/",
                     "$namespace/BuildConfig",
                     "$namespace/R",
                     "$namespace/R$",
