@@ -2,6 +2,7 @@ package com.protectt.trace
 
 import org.gradle.api.DefaultTask
 import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.provider.MapProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.OutputDirectory
@@ -15,21 +16,29 @@ abstract class GenerateMethodTraceRuntimeTask : DefaultTask() {
     @get:OutputDirectory
     abstract val outputDir: DirectoryProperty
 
+    @get:Input
+    abstract val runtimeTemplates: MapProperty<String, String>
+
     @TaskAction
     fun generate() {
         val packageName = "${namespace.get()}.trace"
         val packagePath = packageName.replace('.', '/')
-        val targetFile = File(outputDir.get().asFile, "$packagePath/MethodTraceRuntime.kt")
-        targetFile.parentFile.mkdirs()
-        targetFile.writeText(runtimeSource(packageName))
+        val packageOutputDir = File(outputDir.get().asFile, packagePath)
+        val templates = runtimeTemplates.get().toSortedMap()
+        check(templates.isNotEmpty()) { "MethodTrace runtime template is missing" }
+        if (packageOutputDir.exists()) {
+            packageOutputDir.deleteRecursively()
+        }
+
+        templates.forEach { (templateName, templateSource) ->
+            val outputFileName = templateName.substringBefore(".template")
+            val targetFile = File(packageOutputDir, outputFileName)
+            targetFile.parentFile.mkdirs()
+            targetFile.writeText(runtimeSource(templateSource, packageName))
+        }
     }
 
-    private fun runtimeSource(packageName: String): String {
-        val template = javaClass.getResourceAsStream("/MethodTraceRuntime.template.kt")
-            ?.bufferedReader()
-            ?.use { it.readText() }
-            ?: error("MethodTrace runtime template is missing")
-
-        return template.replace("__PACKAGE__", packageName)
+    private fun runtimeSource(templateSource: String, packageName: String): String {
+        return templateSource.replace("__PACKAGE__", packageName)
     }
 }
