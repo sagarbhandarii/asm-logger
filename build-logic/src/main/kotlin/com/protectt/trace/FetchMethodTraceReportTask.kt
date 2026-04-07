@@ -49,7 +49,7 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
         if (pkg.isEmpty()) throw GradleException("methodTrace.reportApplicationId is required")
         if (remote.isEmpty()) throw GradleException("methodTrace.reportDevicePath is required")
 
-        val candidatePaths = buildRemotePathCandidates(remote)
+        val candidatePaths = buildRemotePathCandidates(pkg = pkg, configuredPath = remote)
         var fetchedRawOutput: String? = null
         val failures = mutableListOf<String>()
         var resolvedRemotePath: String? = null
@@ -204,11 +204,32 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
         )
     }
 
-    private fun buildRemotePathCandidates(configuredPath: String): List<String> {
-        val candidates = linkedSetOf(configuredPath)
-        if (!configuredPath.contains("/")) {
-            candidates += "files/$configuredPath"
+    private fun buildRemotePathCandidates(pkg: String, configuredPath: String): List<String> {
+        val path = configuredPath.trim()
+        val candidates = linkedSetOf(path)
+        val normalized = path.removePrefix("./").trimStart('/')
+        val fileName = normalized.substringAfterLast('/')
+
+        if (!normalized.contains("/")) {
+            candidates += "files/$normalized"
         }
+
+        if (normalized.startsWith("files/")) {
+            candidates += normalized.removePrefix("files/")
+        }
+
+        if (fileName.isNotBlank()) {
+            candidates += "files/$fileName"
+            candidates += "/data/data/$pkg/files/$fileName"
+            candidates += "/data/user/0/$pkg/files/$fileName"
+            candidates += "/data/user_de/0/$pkg/files/$fileName"
+        }
+
+        if (normalized.isNotBlank()) {
+            candidates += normalized
+            candidates += "/$normalized"
+        }
+
         return candidates.toList()
     }
 
