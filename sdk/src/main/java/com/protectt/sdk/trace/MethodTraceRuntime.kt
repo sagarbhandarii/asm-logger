@@ -69,7 +69,7 @@ object MethodTraceRuntime {
     private const val MAX_BUFFERED_EVENTS = 4_096
     private const val DEFAULT_FLUSH_BATCH_SIZE = 1_024
 
-    private const val DEFAULT_OUTPUT_PATH = "/sdcard/method_trace.json"
+    private const val DEFAULT_OUTPUT_PATH = "method_trace.json"
     private const val SUMMARY_FILE_NAME = "methodtrace-summary.json"
 
 
@@ -137,6 +137,8 @@ object MethodTraceRuntime {
 
     @Volatile
     private var outputFilePathOverride: String? = null
+    @Volatile
+    private var applicationContext: Application? = null
 
     @Volatile
     private var traceSink: TraceSink = JsonTraceSink { resolveOutputFile() }
@@ -182,6 +184,7 @@ object MethodTraceRuntime {
 
     @JvmStatic
     fun useAppInternalFiles(application: Application, fileName: String = "methodtrace-report.json") {
+        applicationContext = application
         outputFilePathOverride = File(application.filesDir, fileName).absolutePath
         traceSink = JsonTraceSink { resolveOutputFile() }
     }
@@ -319,6 +322,7 @@ object MethodTraceRuntime {
 
     @JvmStatic
     fun installLifecycleFlush(application: Application, intervalSeconds: Long = flushIntervalSeconds) {
+        applicationContext = application
         flushIntervalSeconds = intervalSeconds.coerceAtLeast(1L)
         startPeriodicFlush()
         ensureMainThreadStallDetector()
@@ -881,12 +885,18 @@ object MethodTraceRuntime {
     }
 
     private fun resolveOutputFile(): File {
-        return File(outputFilePathOverride ?: DEFAULT_OUTPUT_PATH)
+        outputFilePathOverride?.let { return File(it) }
+        val app = applicationContext
+        if (app != null) {
+            val baseDir = app.getExternalFilesDir(null) ?: app.filesDir
+            return File(baseDir, DEFAULT_OUTPUT_PATH)
+        }
+        return File(DEFAULT_OUTPUT_PATH)
     }
 
     private fun resolveSummaryFile(): File {
         val traceFile = resolveOutputFile()
-        return File(traceFile.parentFile ?: File("/sdcard"), SUMMARY_FILE_NAME)
+        return File(traceFile.parentFile ?: applicationContext?.filesDir ?: File("."), SUMMARY_FILE_NAME)
     }
 
     private fun escapeJson(value: String): String {
