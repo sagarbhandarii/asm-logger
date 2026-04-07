@@ -52,10 +52,12 @@ object MethodTraceRuntime {
     private val traceStartNs = SystemClock.elapsedRealtimeNanos()
     private val traceId = buildTraceId()
     private val sessionId = buildTraceId()
-    private val startupProfiler = StartupProfiler(
-        processStartMs = processStartMs,
-        startupWindowMsProvider = { startupWindowMs },
-    )
+    private val startupProfiler by lazy(LazyThreadSafetyMode.NONE) {
+        StartupProfiler(
+            processStartMs = processStartMs,
+            startupWindowMsProvider = { startupWindowMs },
+        )
+    }
 
     private const val TAG = "MethodTrace"
     private const val MAIN_WARN_THRESHOLD_MS = 100L
