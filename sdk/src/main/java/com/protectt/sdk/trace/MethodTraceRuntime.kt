@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.view.ViewTreeObserver
 import java.io.File
 import java.io.RandomAccessFile
 import java.util.ArrayDeque
@@ -33,6 +34,10 @@ object MethodTraceRuntime {
 
     private val processStartMs = SystemClock.elapsedRealtime()
     private val traceStartNs = SystemClock.elapsedRealtimeNanos()
+    private val startupProfiler = StartupProfiler(
+        processStartMs = processStartMs,
+        startupWindowMsProvider = { startupWindowMs },
+    )
 
     private const val TAG = "MethodTrace"
     private const val MAIN_WARN_THRESHOLD_MS = 100L
@@ -156,6 +161,8 @@ object MethodTraceRuntime {
 
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             private var startedCount = 0
+            private var firstActivityCreatedMarked = false
+            private var firstFrameMarked = false
 
             override fun onActivityStarted(activity: Activity) {
                 startedCount += 1
@@ -173,12 +180,56 @@ object MethodTraceRuntime {
                 }
             }
 
-            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
-            override fun onActivityResumed(activity: Activity) = Unit
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+                if (!firstActivityCreatedMarked) {
+                    firstActivityCreatedMarked = true
+                    markStartupMilestone(StartupPhases.FIRST_ACTIVITY_CREATED)
+                }
+            }
+
+            override fun onActivityResumed(activity: Activity) {
+                if (firstFrameMarked) return
+                val observer = activity.window?.decorView?.viewTreeObserver ?: return
+                if (!observer.isAlive) return
+                val listener = object : ViewTreeObserver.OnPreDrawListener {
+                    override fun onPreDraw(): Boolean {
+                        val activeObserver = activity.window?.decorView?.viewTreeObserver
+                        if (activeObserver?.isAlive == true) {
+                            activeObserver.removeOnPreDrawListener(this)
+                        }
+                        if (!firstFrameMarked) {
+                            firstFrameMarked = true
+                            markStartupMilestone(StartupPhases.FIRST_FRAME_PROXY)
+                        }
+                        return true
+                    }
+                }
+                observer.addOnPreDrawListener(listener)
+            }
             override fun onActivityPaused(activity: Activity) = Unit
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
             override fun onActivityDestroyed(activity: Activity) = Unit
         })
+    }
+
+    @JvmStatic
+    fun markApplicationOnCreateStart() {
+        markStartupMilestone(StartupPhases.APPLICATION_ON_CREATE_START)
+    }
+
+    @JvmStatic
+    fun markApplicationOnCreateEnd() {
+        markStartupMilestone(StartupPhases.APPLICATION_ON_CREATE_END)
+    }
+
+    @JvmStatic
+    fun markSdkInitStart() {
+        markStartupMilestone(StartupPhases.SDK_INIT_START)
+    }
+
+    @JvmStatic
+    fun markSdkInitEnd() {
+        markStartupMilestone(StartupPhases.SDK_INIT_END)
     }
 
     @JvmStatic
@@ -300,7 +351,35 @@ object MethodTraceRuntime {
     private fun appendSummaryToFile(snapshot: MethodAggregateTracker.SummarySnapshot) {
         val summaryFile = resolveSummaryFile()
         summaryFile.parentFile?.mkdirs()
-        summaryFile.writeText(snapshot.toJson())
+        summaryFile.writeText(buildSummaryReportJson(snapshot, startupProfiler.summary()))
+    }
+
+    private fun buildSummaryReportJson(
+        methodSnapshot: MethodAggregateTracker.SummarySnapshot,
+        startupSummary: StartupSummary,
+    ): String {
+        return buildString(methodSnapshot.methods.size * 192 + startupSummary.markers.size * 64 + 256) {
+            append('{')
+            append("\"generatedAtEpochMs\":").append(methodSnapshot.generatedAtEpochMs).append(',')
+            append("\"startup\":").append(startupSummary.toJson()).append(',')
+            append("\"methods\":[")
+            methodSnapshot.methods.forEachIndexed { index, summary ->
+                if (index > 0) append(',')
+                append('{')
+                append("\"methodId\":\"").append(escapeJson(summary.methodId)).append("\",")
+                append("\"callCount\":").append(summary.callCount).append(',')
+                append("\"totalNs\":").append(summary.totalNs).append(',')
+                append("\"maxNs\":").append(summary.maxNs).append(',')
+                append("\"minNs\":").append(summary.minNs).append(',')
+                append("\"p50Ns\":").append(summary.p50Ns).append(',')
+                append("\"p95Ns\":").append(summary.p95Ns).append(',')
+                append("\"p99Ns\":").append(summary.p99Ns).append(',')
+                append("\"selfTotalNs\":").append(summary.selfTotalNs).append(',')
+                append("\"mainThreadTotalNs\":").append(summary.mainThreadTotalNs)
+                append('}')
+            }
+            append("]}")
+        }
     }
 
     private fun popAndComputeSelfNs(methodId: String, startNs: Long, durationNs: Long): Long {
@@ -430,6 +509,29 @@ object MethodTraceRuntime {
         if (shouldScheduleFlush) {
             queueAsyncFlush()
         }
+    }
+
+    private fun markStartupMilestone(phase: String) {
+        val marker = startupProfiler.mark(name = phase, nowMs = SystemClock.elapsedRealtime()) ?: return
+        enqueueEventJson(buildStartupMarkerEventJson(marker))
+    }
+
+    private fun buildStartupMarkerEventJson(marker: StartupMarker): String {
+        val sb = getOrCreateThreadState().jsonBuilder
+        sb.setLength(0)
+        sb.append('{')
+            .append("\"name\":\"startup_marker\",")
+            .append("\"cat\":\"startup\",")
+            .append("\"ph\":\"i\",")
+            .append("\"s\":\"t\",")
+            .append("\"ts\":").append(marker.elapsedMs * 1_000L).append(',')
+            .append("\"pid\":0,")
+            .append("\"tid\":0,")
+            .append("\"args\":{")
+            .append("\"phase\":\"").append(escapeJson(marker.name)).append("\",")
+            .append("\"elapsedMs\":").append(marker.elapsedMs)
+            .append("}}")
+        return sb.toString()
     }
 
     private fun resolveOutputFile(): File {
