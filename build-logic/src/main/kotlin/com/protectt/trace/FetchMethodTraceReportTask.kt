@@ -68,7 +68,9 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
             val failureSummary = failures.joinToString(separator = " | ")
             throw GradleException(
                 "Failed to fetch MethodTrace report from device. " +
-                    "package=$pkg attemptedPaths=${candidatePaths.joinToString()} details=$failureSummary"
+                    "package=$pkg attemptedPaths=${candidatePaths.joinToString()} details=$failureSummary " +
+                    "hint=Ensure your app writes the summary to internal files (for example call " +
+                    "MethodTraceRuntime.useAppInternalFiles(application, \"methodtrace-report.json\"))"
             )
         }
 
