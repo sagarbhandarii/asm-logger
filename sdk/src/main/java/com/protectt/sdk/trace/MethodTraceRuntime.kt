@@ -83,6 +83,7 @@ object MethodTraceRuntime {
     private val pendingEvents = ArrayDeque<String>(INITIAL_BUFFER_CAPACITY)
 
     private val aggregateTracker = MethodAggregateTracker()
+    private val frameJankTracker = FrameJankTracker()
     private val summaryDirty = AtomicBoolean(false)
     private val summaryFlushQueued = AtomicBoolean(false)
     private val exceptionTracker = ExceptionCorrelationTracker(
@@ -100,6 +101,8 @@ object MethodTraceRuntime {
     private var scheduler: ScheduledExecutorService? = null
     @Volatile
     private var mainThreadStallDetector: MainThreadBlockDetector? = null
+    @Volatile
+    private var frameMetricsCollector: FrameMetricsCollector? = null
 
     @Volatile
     private var traceFileInitialized = false
@@ -140,11 +143,13 @@ object MethodTraceRuntime {
 
         val selfNs = popAndComputeSelfNs(methodId = methodId, startNs = startNanos, durationNs = durationNs)
         updateActiveMethodForCurrentThread()
+        val startupActive = SystemClock.elapsedRealtime() - processStartMs <= startupWindowMs
         aggregateTracker.record(
             methodId = methodId,
             durationNs = durationNs,
             selfNs = selfNs,
             isMainThread = isMainThread(),
+            isStartupWindow = startupActive,
         )
         summaryDirty.set(true)
 
@@ -202,6 +207,7 @@ object MethodTraceRuntime {
         flushIntervalSeconds = intervalSeconds.coerceAtLeast(1L)
         startPeriodicFlush()
         ensureMainThreadStallDetector()
+        ensureFrameMetricsCollector()
         mainThreadStallDetector?.start()
 
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
@@ -233,6 +239,7 @@ object MethodTraceRuntime {
             }
 
             override fun onActivityResumed(activity: Activity) {
+                frameMetricsCollector?.onActivityResumed(activity)
                 if (firstFrameMarked) return
                 val observer = activity.window?.decorView?.viewTreeObserver ?: return
                 if (!observer.isAlive) return
@@ -251,7 +258,9 @@ object MethodTraceRuntime {
                 }
                 observer.addOnPreDrawListener(listener)
             }
-            override fun onActivityPaused(activity: Activity) = Unit
+            override fun onActivityPaused(activity: Activity) {
+                frameMetricsCollector?.onActivityPaused(activity)
+            }
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
             override fun onActivityDestroyed(activity: Activity) = Unit
         })
@@ -300,6 +309,8 @@ object MethodTraceRuntime {
         scheduler = null
         mainThreadStallDetector?.stop()
         mainThreadStallDetector = null
+        frameMetricsCollector?.stop()
+        frameMetricsCollector = null
     }
 
     @JvmStatic
@@ -412,6 +423,7 @@ object MethodTraceRuntime {
             append('{')
             append("\"generatedAtEpochMs\":").append(methodSnapshot.generatedAtEpochMs).append(',')
             append("\"startup\":").append(startupSummary.toJson()).append(',')
+            append("\"frames\":").append(frameJankTracker.snapshot().toJson()).append(',')
             append("\"exceptions\":").append(exceptionsToJson(exceptions)).append(',')
             append("\"methods\":[")
             methodSnapshot.methods.forEachIndexed { index, summary ->
@@ -426,7 +438,8 @@ object MethodTraceRuntime {
                 append("\"p95Ns\":").append(summary.p95Ns).append(',')
                 append("\"p99Ns\":").append(summary.p99Ns).append(',')
                 append("\"selfTotalNs\":").append(summary.selfTotalNs).append(',')
-                append("\"mainThreadTotalNs\":").append(summary.mainThreadTotalNs)
+                append("\"mainThreadTotalNs\":").append(summary.mainThreadTotalNs).append(',')
+                append("\"startupTotalNs\":").append(summary.startupTotalNs)
                 append('}')
             }
             append("]}")
@@ -518,6 +531,31 @@ object MethodTraceRuntime {
         )
     }
 
+    private fun ensureFrameMetricsCollector() {
+        if (frameMetricsCollector != null) return
+        val mainThreadId = Looper.getMainLooper().thread.id
+        frameMetricsCollector = FrameMetricsCollector { durationNs ->
+            val activeMethod = activeMethodByThreadId[mainThreadId]
+            val startupActive = SystemClock.elapsedRealtime() - processStartMs <= startupWindowMs
+            val bucket = frameJankTracker.record(
+                durationNs = durationNs,
+                activeMethodId = activeMethod,
+                isStartupWindow = startupActive,
+            )
+            if (bucket != FrameBucket.NORMAL) {
+                enqueueEventJson(
+                    buildJankyFrameEventJson(
+                        durationNs = durationNs,
+                        bucket = bucket,
+                        activeMethodId = activeMethod,
+                        inStartupWindow = startupActive,
+                    ),
+                )
+            }
+            summaryDirty.set(true)
+        }
+    }
+
     private fun updateActiveMethodForCurrentThread() {
         val threadId = Thread.currentThread().id
         val method = getOrCreateThreadState().callStack.lastOrNull()?.methodId
@@ -583,6 +621,35 @@ object MethodTraceRuntime {
             .append("\"phase\":\"").append(escapeJson(marker.name)).append("\",")
             .append("\"elapsedMs\":").append(marker.elapsedMs)
             .append("}}")
+        return sb.toString()
+    }
+
+    private fun buildJankyFrameEventJson(
+        durationNs: Long,
+        bucket: FrameBucket,
+        activeMethodId: String?,
+        inStartupWindow: Boolean,
+    ): String {
+        val sb = getOrCreateThreadState().jsonBuilder
+        sb.setLength(0)
+        val mainThreadId = Looper.getMainLooper().thread.id
+        val tsUs = ((SystemClock.elapsedRealtimeNanos() - traceStartNs).coerceAtLeast(0L) / 1_000L)
+        sb.append('{')
+            .append("\"name\":\"frame_jank\",")
+            .append("\"cat\":\"frame\",")
+            .append("\"ph\":\"i\",")
+            .append("\"s\":\"t\",")
+            .append("\"ts\":").append(tsUs).append(',')
+            .append("\"pid\":0,")
+            .append("\"tid\":").append(mainThreadId).append(',')
+            .append("\"args\":{")
+            .append("\"durationNs\":").append(durationNs).append(',')
+            .append("\"bucket\":\"").append(bucket.label).append("\",")
+            .append("\"startupWindow\":").append(inStartupWindow)
+        activeMethodId?.let {
+            sb.append(',').append("\"activeMethod\":\"").append(escapeJson(formatMethodId(it))).append('"')
+        }
+        sb.append("}}")
         return sb.toString()
     }
 
@@ -728,6 +795,7 @@ internal class MethodAggregateTracker(
         val p99Ns: Long,
         val selfTotalNs: Long,
         val mainThreadTotalNs: Long,
+        val startupTotalNs: Long,
     )
 
     data class SummarySnapshot(
@@ -753,7 +821,8 @@ internal class MethodAggregateTracker(
                     append("\"p95Ns\":").append(summary.p95Ns).append(',')
                     append("\"p99Ns\":").append(summary.p99Ns).append(',')
                     append("\"selfTotalNs\":").append(summary.selfTotalNs).append(',')
-                    append("\"mainThreadTotalNs\":").append(summary.mainThreadTotalNs)
+                    append("\"mainThreadTotalNs\":").append(summary.mainThreadTotalNs).append(',')
+                    append("\"startupTotalNs\":").append(summary.startupTotalNs)
                     append('}')
                 }
                 append("]}")
@@ -768,6 +837,7 @@ internal class MethodAggregateTracker(
         var minNs: Long = Long.MAX_VALUE,
         var selfTotalNs: Long = 0L,
         var mainThreadTotalNs: Long = 0L,
+        var startupTotalNs: Long = 0L,
         val sampler: ReservoirSampler,
     )
 
@@ -817,7 +887,13 @@ internal class MethodAggregateTracker(
     private val lock = Any()
     private val statsByMethod = LinkedHashMap<String, MutableStats>()
 
-    fun record(methodId: String, durationNs: Long, selfNs: Long, isMainThread: Boolean) {
+    fun record(
+        methodId: String,
+        durationNs: Long,
+        selfNs: Long,
+        isMainThread: Boolean,
+        isStartupWindow: Boolean = false,
+    ) {
         synchronized(lock) {
             val stats = statsByMethod.getOrPut(methodId) {
                 MutableStats(sampler = ReservoirSampler(percentileSampleSize, rng))
@@ -829,6 +905,9 @@ internal class MethodAggregateTracker(
             stats.selfTotalNs += boundedSelf
             if (isMainThread) {
                 stats.mainThreadTotalNs += boundedDuration
+            }
+            if (isStartupWindow) {
+                stats.startupTotalNs += boundedDuration
             }
             stats.maxNs = maxOf(stats.maxNs, boundedDuration)
             stats.minNs = minOf(stats.minNs, boundedDuration)
@@ -850,6 +929,7 @@ internal class MethodAggregateTracker(
                     p99Ns = stats.sampler.percentile(0.99),
                     selfTotalNs = stats.selfTotalNs,
                     mainThreadTotalNs = stats.mainThreadTotalNs,
+                    startupTotalNs = stats.startupTotalNs,
                 )
             }
             return SummarySnapshot(generatedAtEpochMs = nowMs, methods = methods)
