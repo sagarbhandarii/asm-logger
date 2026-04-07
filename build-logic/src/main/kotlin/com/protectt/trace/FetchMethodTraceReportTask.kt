@@ -49,26 +49,40 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
         if (pkg.isEmpty()) throw GradleException("methodTrace.reportApplicationId is required")
         if (remote.isEmpty()) throw GradleException("methodTrace.reportDevicePath is required")
 
-        val stdOut = ByteArrayOutputStream()
-        val stdErr = ByteArrayOutputStream()
-        val result = execOperations.exec {
-            commandLine("adb", "shell", "run-as", pkg, "cat", remote)
-            standardOutput = stdOut
-            errorOutput = stdErr
-            isIgnoreExitValue = true
+        val candidatePaths = buildRemotePathCandidates(remote)
+        var rawOutput: String? = null
+        val failures = mutableListOf<String>()
+        var resolvedRemotePath: String? = null
+        for (candidate in candidatePaths) {
+            val attempt = fetchFromDevice(pkg = pkg, remotePath = candidate)
+            if (attempt.exitValue == 0) {
+                rawOutput = attempt.output
+                resolvedRemotePath = candidate
+                break
+            }
+            val error = attempt.error.ifBlank { "Unknown adb error" }
+            failures += "path=$candidate error=$error"
         }
 
-        if (result.exitValue != 0) {
-            val err = stdErr.toString().ifBlank { "Unknown adb error" }
+        if (rawOutput == null) {
+            val failureSummary = failures.joinToString(separator = " | ")
             throw GradleException(
                 "Failed to fetch MethodTrace report from device. " +
-                    "package=$pkg path=$remote error=$err"
+                    "package=$pkg attemptedPaths=${candidatePaths.joinToString()} details=$failureSummary"
             )
         }
 
-        val rawOutput = stdOut.toString()
+        if (candidatePaths.size > 1 && resolvedRemotePath != null && resolvedRemotePath != remote) {
+            logger.lifecycle(
+                "[methodTrace] Fetched report using fallback path \"$resolvedRemotePath\" " +
+                    "(configured \"$remote\")"
+            )
+        }
+
+        val rawOutput = rawOutput
         if (rawOutput.isBlank()) {
-            throw GradleException("Fetched report is empty for package=$pkg path=$remote")
+            val pathHint = resolvedRemotePath ?: remote
+            throw GradleException("Fetched report is empty for package=$pkg path=$pathHint")
         }
 
         val root = parseReportRoot(rawOutput)
@@ -189,6 +203,36 @@ abstract class FetchMethodTraceReportTask @Inject constructor(
                 "Preview=\"$preview\""
         )
     }
+
+    private fun buildRemotePathCandidates(configuredPath: String): List<String> {
+        val candidates = linkedSetOf(configuredPath)
+        if (!configuredPath.contains("/")) {
+            candidates += "files/$configuredPath"
+        }
+        return candidates.toList()
+    }
+
+    private fun fetchFromDevice(pkg: String, remotePath: String): FetchAttempt {
+        val stdOut = ByteArrayOutputStream()
+        val stdErr = ByteArrayOutputStream()
+        val result = execOperations.exec {
+            commandLine("adb", "shell", "run-as", pkg, "cat", remotePath)
+            standardOutput = stdOut
+            errorOutput = stdErr
+            isIgnoreExitValue = true
+        }
+        return FetchAttempt(
+            exitValue = result.exitValue,
+            output = stdOut.toString(),
+            error = stdErr.toString(),
+        )
+    }
+
+    private data class FetchAttempt(
+        val exitValue: Int,
+        val output: String,
+        val error: String,
+    )
 
     private fun unescapeLikelyJson(input: String): String {
         val decoded = StringBuilder(input.length)
