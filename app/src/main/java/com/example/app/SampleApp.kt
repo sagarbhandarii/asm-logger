@@ -6,6 +6,7 @@ import com.protectt.sdk.trace.MethodTraceRuntime
 
 class SampleApp : Application() {
     override fun onCreate() {
+        MethodTraceRuntime.markApplicationOnCreateStart()
         super.onCreate()
 
         MethodTraceRuntime.enabled = true
@@ -14,5 +15,6 @@ class SampleApp : Application() {
         MethodTraceRuntime.installLifecycleFlush(this, intervalSeconds = 5L)
 
         ProtecttSdk.init(this)
+        MethodTraceRuntime.markApplicationOnCreateEnd()
     }
 }
