@@ -66,6 +66,12 @@ internal class StartupProfiler(
         }
     }
 
+    fun latestMarkerName(): String? {
+        synchronized(lock) {
+            return markersByName.maxByOrNull { it.value }?.key
+        }
+    }
+
     fun summary(): StartupSummary {
         synchronized(lock) {
             val ordered = markersByName
