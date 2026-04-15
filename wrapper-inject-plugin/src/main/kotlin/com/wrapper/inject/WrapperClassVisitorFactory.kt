@@ -5,13 +5,17 @@ import com.android.build.api.instrumentation.ClassContext
 import com.android.build.api.instrumentation.ClassData
 import com.android.build.api.instrumentation.InstrumentationParameters
 import org.gradle.api.provider.Property
+import org.gradle.api.tasks.Input
 import org.objectweb.asm.ClassVisitor
 
 abstract class WrapperClassVisitorFactory :
     AsmClassVisitorFactory<WrapperClassVisitorFactory.Params> {
 
     interface Params : InstrumentationParameters {
+        @get:Input
         val appPackage: Property<String>
+
+        @get:Input
         val excludedPackage: Property<String>
     }
 
