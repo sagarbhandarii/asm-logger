@@ -16,4 +16,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "android-asm-methodtrace-sample"
-include(":app", ":sdk")
+include(":app", ":sdk", ":wrapper-sdk", ":wrapper-inject-plugin")
