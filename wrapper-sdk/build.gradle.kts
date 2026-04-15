@@ -45,6 +45,6 @@ android {
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.13.1")
-    implementation("com.your.security:core-sdk:1.0.0")
+//    implementation("androidx.core:core-ktx:1.13.1")
+//    implementation("com.your.security:core-sdk:1.0.0")
 }

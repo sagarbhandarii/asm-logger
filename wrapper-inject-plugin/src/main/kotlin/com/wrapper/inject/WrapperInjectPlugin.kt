@@ -15,7 +15,7 @@ class WrapperInjectPlugin : Plugin<Project> {
                     WrapperClassVisitorFactory::class.java,
                     InstrumentationScope.PROJECT
                 ) { params ->
-                    params.appPackage.set(variant.namespace ?: project.group.toString())
+                    params.appPackage.set(variant.namespace)
                     params.excludedPackage.set("com.wrapper.sdk")
                 }
                 variant.instrumentation.setAsmFramesComputationMode(

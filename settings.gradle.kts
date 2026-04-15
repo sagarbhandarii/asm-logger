@@ -1,10 +1,12 @@
 pluginManagement {
     includeBuild("build-logic")
+    includeBuild("wrapper-inject-plugin")
     repositories {
         google()
         mavenCentral()
         gradlePluginPortal()
     }
+
 }
 
 dependencyResolutionManagement {
@@ -16,4 +18,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "android-asm-methodtrace-sample"
-include(":app", ":sdk", ":wrapper-sdk", ":wrapper-inject-plugin")
+include(":app", ":sdk", ":wrapper-sdk")

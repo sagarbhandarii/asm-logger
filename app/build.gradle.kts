@@ -1,15 +1,10 @@
-buildscript {
-    dependencies {
-        classpath(project(":wrapper-inject-plugin"))
-    }
-}
-
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.wrapper.inject")
 }
 
-apply(plugin = "com.wrapper.inject")
+//apply(plugin = "com.wrapper.inject")
 
 android {
     namespace = "com.example.app"

@@ -34,6 +34,11 @@ android {
 methodTrace {
     enabled = true
     reportApplicationId ="com.example.app"
+    startupWindowMs = 20_000L
+    reportFetchWaitSeconds = 1
+    includeThirdPartySdks = true
+    reportDevicePath = "files/methodtrace-report.json"
+
 }
 
 dependencies {
