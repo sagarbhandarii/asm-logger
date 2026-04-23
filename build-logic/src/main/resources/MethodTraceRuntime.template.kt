@@ -171,6 +171,38 @@ object MethodTraceRuntime {
         })
     }
 
+    /**
+     * Compatibility marker for base projects that call startup milestone hooks.
+     * The lightweight generated runtime does not include startup phase modeling yet,
+     * so this remains a no-op instead of crashing with missing method errors.
+     */
+    @JvmStatic
+    fun markApplicationOnCreateStart() = Unit
+
+    /**
+     * Compatibility marker for base projects that call startup milestone hooks.
+     * The lightweight generated runtime does not include startup phase modeling yet,
+     * so this remains a no-op instead of crashing with missing method errors.
+     */
+    @JvmStatic
+    fun markApplicationOnCreateEnd() = Unit
+
+    /**
+     * Compatibility marker for base projects that call SDK init milestone hooks.
+     * The lightweight generated runtime does not include startup phase modeling yet,
+     * so this remains a no-op instead of crashing with missing method errors.
+     */
+    @JvmStatic
+    fun markSdkInitStart() = Unit
+
+    /**
+     * Compatibility marker for base projects that call SDK init milestone hooks.
+     * The lightweight generated runtime does not include startup phase modeling yet,
+     * so this remains a no-op instead of crashing with missing method errors.
+     */
+    @JvmStatic
+    fun markSdkInitEnd() = Unit
+
     @JvmStatic
     fun startPeriodicFlush() {
         val existing = scheduler
